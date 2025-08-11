@@ -1,0 +1,119 @@
+{
+  "name": "storymaker-ai",
+  "version": "1.0.0",
+  "description": "StoryMaker AI Desktop App",
+  "main": "dist-electron/main.js",
+  "author": "StoryMaker",
+  "homepage": "./",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
+    "electron-dev": "concurrently \"npm run dev\" \"npm run electron\"",
+    "electron-builder": "npm run build && electron-builder",
+    "electron-builder-win": "npm run build && electron-builder --win",
+    "electron-builder-mac": "npm run build && electron-builder --mac",
+    "dist": "npm run build && electron-builder --publish=never",
+    "dist-win": "npm run build && electron-builder --win --publish=never",
+    "dist-win-installer": "npm run build && electron-builder --win nsis --publish=never",
+    "dist-mac": "npm run build && electron-builder --mac --publish=never",
+    "rebuild": "node rebuild-electron.js",
+    "postbuild": "node postbuild.js"
+  },
+  "dependencies": {
+    "@radix-ui/react-alert-dialog": "^1.0.5",
+    "@radix-ui/react-collapsible": "^1.1.11",
+    "@radix-ui/react-dialog": "^1.0.5",
+    "@radix-ui/react-dropdown-menu": "^2.0.6",
+    "@radix-ui/react-label": "^2.0.2",
+    "@radix-ui/react-popover": "^1.0.7",
+    "@radix-ui/react-progress": "^1.1.7",
+    "@radix-ui/react-radio-group": "^1.3.7",
+    "@radix-ui/react-slider": "^1.3.5",
+    "@radix-ui/react-slot": "^1.0.2",
+    "@types/ffmpeg-static": "^3.0.3",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "ffmpeg-static": "^5.2.0",
+    "form-data": "^4.0.4",
+    "framer-motion": "^12.23.0",
+    "lucide-react": "^0.263.1",
+    "nedb": "^1.8.0",
+    "openai": "^4.104.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.8.1",
+    "tailwind-merge": "^1.14.0"
+  },
+  "devDependencies": {
+    "@types/nedb": "^1.8.16",
+    "@types/node": "^20.4.5",
+    "@types/plist": "^3.0.5",
+    "@types/react": "^18.2.15",
+    "@types/react-dom": "^18.2.7",
+    "@vitejs/plugin-react": "^4.0.3",
+    "autoprefixer": "^10.4.14",
+    "concurrently": "^8.2.0",
+    "copyfiles": "^2.4.1",
+    "cross-env": "^7.0.3",
+    "electron": "^25.3.1",
+    "electron-builder": "^23.6.0",
+    "postcss": "^8.4.27",
+    "tailwindcss": "^3.3.3",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5",
+    "vite-plugin-electron": "^0.11.2",
+    "vite-plugin-electron-renderer": "^0.14.1",
+    "wait-on": "^7.0.1"
+  },
+  "build": {
+    "appId": "com.storymaker.ai",
+    "productName": "StoryMaker AI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*"
+    ],
+
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
