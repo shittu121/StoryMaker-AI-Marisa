@@ -141,6 +141,8 @@ const AudioPreview: React.FC<AudioPreviewProps> = ({
     });
   }, [allGenerated, isGenerating, audioChunks]);
 
+
+
   // Monitor completion of audio generation
   useEffect(() => {
     if (!isGenerating && allGenerated && audioChunks.length > 0) {
@@ -1308,14 +1310,53 @@ const AudioPreview: React.FC<AudioPreviewProps> = ({
 
   // Get voice info for both voices
   // Resolve selected voice name/description from VOICE_DATA or Murf list via window cache
+  // **NEW: Function to get selected voice info from localStorage cache**
+  const getSelectedVoiceFromCache = (voiceId: string): { name: string; description?: string } | null => {
+    try {
+      const cachedVoices = localStorage.getItem('murfVoicesCache');
+      if (cachedVoices) {
+        const voices = JSON.parse(cachedVoices);
+        const cachedVoice = voices.find((v: any) => v.voice_id === voiceId);
+        if (cachedVoice) {
+          console.log(`🎵 AudioPreview: Found voice in cache: ${cachedVoice.name} (${voiceId})`);
+          return {
+            name: cachedVoice.name,
+            description: cachedVoice.description
+          };
+        }
+      }
+    } catch (error) {
+      console.warn('AudioPreview: Failed to get voice from cache:', error);
+    }
+    return null;
+  };
+
   const resolveVoiceInfo = (id: string): VoiceInfo => {
     if (!id) return { name: "Unknown Voice", description: "Voice not found" };
+    
+    // **FIXED: Check localStorage cache first for selected voice name/description**
+    const cachedVoice = getSelectedVoiceFromCache(id);
+    if (cachedVoice) {
+      return { 
+        name: cachedVoice.name, 
+        description: cachedVoice.description || "Voice from cache" 
+      };
+    }
+    
+    // Fallback to local VOICE_DATA
     const local = VOICE_DATA[id];
     if (local) return local;
+    
+    // Fallback to window.murfVoices (API)
     const murf = (window as any)?.murfVoices?.find?.((v: any) => v.voice_id === id);
-    if (murf) return { name: murf.name, description: murf.description };
+    if (murf) {
+      return { name: murf.name, description: murf.description };
+    }
+    
     return { name: "Unknown Voice", description: "Voice not found" };
   };
+
+
 
   const selectedVoiceInfo = resolveVoiceInfo(selectedVoiceId);
 
@@ -2146,7 +2187,7 @@ const AudioPreview: React.FC<AudioPreviewProps> = ({
                           The audio was previously generated but is no longer
                           available for playback.
                         </p>
-                      </div>
+                      </div>  
                       <Button
                         onClick={() => {
                           setAllGenerated(false);

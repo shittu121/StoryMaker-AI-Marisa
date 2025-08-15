@@ -185,44 +185,212 @@ const CreateStoryScreen: React.FC = () => {
 
   // Simple audio state - only one audio at a time
 
-  // Get voice name helper (checks dynamic Murf list, then static fallbacks)
+  // **FIXED: Enhanced voice name helper with localStorage caching**
   const getVoiceName = (voiceId: string) => {
     if (!voiceId) return "";
 
-    // 1) Prefer dynamic Murf voices fetched at runtime
+    // First, try to get from localStorage cache
+    try {
+      const cachedVoices = localStorage.getItem('murfVoicesCache');
+      if (cachedVoices) {
+        const parsedVoices: Array<{ voice_id: string; name: string }> = JSON.parse(cachedVoices);
+        const cachedMatch = parsedVoices.find((v) => v.voice_id === voiceId);
+        if (cachedMatch?.name) {
+          return cachedMatch.name;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to parse cached voices from localStorage:', error);
+    }
+
+    // Fallback to dynamic Murf voices from API
     const murfVoices: Array<{ voice_id: string; name: string }> =
       (window as any)?.murfVoices || [];
+    
     const murfMatch = Array.isArray(murfVoices)
       ? murfVoices.find((v) => v.voice_id === voiceId)
       : undefined;
-    if (murfMatch?.name) return murfMatch.name;
+    
+    if (murfMatch?.name) {
+      // Cache this voice for future use
+      cacheVoice(murfMatch);
+      return murfMatch.name;
+    }
 
-    // 2) Fallback to static map for legacy/known IDs
-    const voiceMap: Record<string, string> = {
-      // Murf.ai voice IDs
-      "en-US-natalie": "Natalie",
-      "en-US-amara": "Amara",
-      "en-US-miles": "Miles",
-      "en-US-ryan": "Ryan",
-      // Legacy ElevenLabs IDs (for backward compatibility)
-      "21m00Tcm4TlvDq8ikWAM": "Rachel",
-      AZnzlk1XvdvUeBnXmlld: "Alice",
-      EXAVITQu4vr4xnSDxMaL: "Lily",
-      ErXwobaYiN019PkySvjV: "Henry",
-      MF3mGyEYCl7XYWbV9V6O: "Elli",
-      kdmDKE6EkgrWrrykO9Qt: "Alexandra",
-      L0Dsvb3SLTyegXwtm47J: "Archer",
-      g6xIsTj2HwM6VR4iXFCw: "Jessica Anne Bogart",
-      OYTbf65OHHFELVut7v2H: "Hope",
-      dj3G1R1ilKoFKhBnWOzG: "Eryn",
-      HDA9tsk27wYi3uq0fPcK: "Stuart",
-      "1SM7GgM6IMuvQlz2BwM3": "Mark",
-      PT4nqlKZfc06VW1BuClj: "Angela",
-      vBKc2FfBKJfcZNyEt1n6: "Finn",
-      "56AoDkrOh6qfVPDXZ7Pt": "Cassidy",
-      NOpBlnGInO9m6vDvFkFC: "Grandpa Spuds Oxley",
-    };
-    return voiceMap[voiceId] || "Unknown Voice";
+    return "Unknown Voice";
+  };
+
+  // **NEW: Function to cache voice data in localStorage**
+  const cacheVoice = (voice: { voice_id: string; name: string }) => {
+    try {
+      const existingCache = localStorage.getItem('murfVoicesCache');
+      let cachedVoices: Array<{ voice_id: string; name: string }> = [];
+      
+      if (existingCache) {
+        try {
+          cachedVoices = JSON.parse(existingCache);
+        } catch (error) {
+          console.warn('Failed to parse existing voice cache, starting fresh');
+          cachedVoices = [];
+        }
+      }
+
+      // Check if voice already exists in cache
+      const existingIndex = cachedVoices.findIndex(v => v.voice_id === voice.voice_id);
+      if (existingIndex >= 0) {
+        // Update existing entry
+        cachedVoices[existingIndex] = voice;
+      } else {
+        // Add new voice to cache
+        cachedVoices.push(voice);
+      }
+
+      // Limit cache size to prevent localStorage from getting too large (max 100 voices)
+      if (cachedVoices.length > 100) {
+        cachedVoices = cachedVoices.slice(-100);
+      }
+
+      localStorage.setItem('murfVoicesCache', JSON.stringify(cachedVoices));
+      console.log(`🎵 Cached voice: ${voice.name} (${voice.voice_id})`);
+    } catch (error) {
+      console.warn('Failed to cache voice in localStorage:', error);
+    }
+  };
+
+  // **NEW: Function to bulk cache voices from API response**
+  const cacheVoicesFromAPI = (voices: Array<{ voice_id: string; name: string }>) => {
+    if (!Array.isArray(voices) || voices.length === 0) return;
+    
+    try {
+      const existingCache = localStorage.getItem('murfVoicesCache');
+      let cachedVoices: Array<{ voice_id: string; name: string }> = [];
+      
+      if (existingCache) {
+        try {
+          cachedVoices = JSON.parse(existingCache);
+        } catch (error) {
+          console.warn('Failed to parse existing voice cache, starting fresh');
+          cachedVoices = [];
+        }
+      }
+
+      // Merge new voices with existing cache
+      voices.forEach(voice => {
+        const existingIndex = cachedVoices.findIndex(v => v.voice_id === voice.voice_id);
+        if (existingIndex >= 0) {
+          cachedVoices[existingIndex] = voice;
+        } else {
+          cachedVoices.push(voice);
+        }
+      });
+
+      // Limit cache size
+      if (cachedVoices.length > 100) {
+        cachedVoices = cachedVoices.slice(-100);
+      }
+
+      localStorage.setItem('murfVoicesCache', JSON.stringify(cachedVoices));
+      console.log(`🎵 Bulk cached ${voices.length} voices in localStorage`);
+    } catch (error) {
+      console.warn('Failed to bulk cache voices in localStorage:', error);
+    }
+  };
+
+  // **NEW: Function to get all cached voices**
+  const getCachedVoices = (): Array<{ voice_id: string; name: string }> => {
+    try {
+      const cachedVoices = localStorage.getItem('murfVoicesCache');
+      if (cachedVoices) {
+        return JSON.parse(cachedVoices);
+      }
+    } catch (error) {
+      console.warn('Failed to get cached voices:', error);
+    }
+    return [];
+  };
+
+  // **NEW: Function to clear voice cache**
+  const clearVoiceCache = () => {
+    try {
+      localStorage.removeItem('murfVoicesCache');
+      console.log('🎵 Voice cache cleared from localStorage');
+    } catch (error) {
+      console.warn('Failed to clear voice cache:', error);
+    }
+  };
+
+  // **NEW: Function to refresh voice cache from API**
+  const refreshVoiceCache = async () => {
+    try {
+      console.log('🎵 Refreshing voice cache from API...');
+      
+      // Clear existing cache
+      clearVoiceCache();
+      
+      // Get fresh voices from API (if available)
+      const murfVoices: Array<{ voice_id: string; name: string }> = (window as any)?.murfVoices || [];
+      if (murfVoices.length > 0) {
+        cacheVoicesFromAPI(murfVoices);
+        console.log(`🎵 Refreshed cache with ${murfVoices.length} voices`);
+      } else {
+        console.log('🎵 No voices available from API for refresh');
+      }
+    } catch (error) {
+      console.warn('Failed to refresh voice cache:', error);
+    }
+  };
+
+  // **NEW: Function to export voice cache for debugging */
+  const exportVoiceCache = () => {
+    try {
+      const cachedVoices = getCachedVoices();
+      const cacheInfo = {
+        timestamp: new Date().toISOString(),
+        totalVoices: cachedVoices.length,
+        voices: cachedVoices
+      };
+      
+      console.log('🎵 Voice Cache Export:', cacheInfo);
+      
+      // Copy to clipboard
+      navigator.clipboard.writeText(JSON.stringify(cacheInfo, null, 2)).then(() => {
+        addToast({
+          type: 'success',
+          title: 'Cache Exported',
+          message: 'Voice cache copied to clipboard'
+        });
+      }).catch(() => {
+        addToast({
+          type: 'info',
+          title: 'Cache Info',
+          message: `Voice cache logged to console (${cachedVoices.length} voices)`
+        });
+      });
+    } catch (error) {
+      console.warn('Failed to export voice cache:', error);
+    }
+  };
+
+  // **NEW: Function to log cache status for debugging */
+  const logCacheStatus = () => {
+    try {
+      const cachedVoices = getCachedVoices();
+      const selectedVoiceId = storyData.selectedVoiceId;
+      const generatedVoiceId = generatedAudioVoiceId;
+      
+      console.log('🎵 Voice Cache Status:', {
+        cachedVoicesCount: cachedVoices.length,
+        selectedVoiceId,
+        selectedVoiceName: selectedVoiceId ? getVoiceName(selectedVoiceId) : 'None',
+        generatedVoiceId,
+        generatedVoiceName: generatedVoiceId ? getVoiceName(generatedVoiceId) : 'None',
+        cacheKeys: Object.keys(localStorage).filter(key => key.includes('voice') || key.includes('murf')),
+        selectedVoiceInCache: selectedVoiceId ? cachedVoices.some(v => v.voice_id === selectedVoiceId) : false,
+        generatedVoiceInCache: generatedVoiceId ? cachedVoices.some(v => v.voice_id === generatedVoiceId) : false
+      });
+    } catch (error) {
+      console.warn('Failed to log cache status:', error);
+    }
   };
 
   // Update audio state when audio is generated (replaces any previous audio)
@@ -277,6 +445,61 @@ const CreateStoryScreen: React.FC = () => {
       duration: 0,
     },
   ]);
+
+  // **NEW: Initialize voice cache from localStorage and API on component mount**
+  useEffect(() => {
+    const initializeVoiceCache = async () => {
+      try {
+        // Check if we already have voices cached
+        const existingCache = localStorage.getItem('murfVoicesCache');
+        if (existingCache) {
+          const cachedVoices = JSON.parse(existingCache);
+          console.log(`🎵 Found existing voice cache in localStorage with ${cachedVoices.length} voices`);
+          return;
+        }
+
+        // If no cache exists, try to get voices from API and cache them
+        console.log('🎵 No voice cache found, attempting to fetch from API...');
+        
+        // Check if murfVoices are already available in window object
+        const murfVoices: Array<{ voice_id: string; name: string }> = (window as any)?.murfVoices || [];
+        if (murfVoices.length > 0) {
+          console.log(`🎵 Found ${murfVoices.length} voices in window object, caching them...`);
+          cacheVoicesFromAPI(murfVoices);
+        } else {
+          console.log('🎵 No voices found in window object, will cache when available');
+        }
+      } catch (error) {
+        console.warn('Failed to initialize voice cache:', error);
+      }
+    };
+
+    initializeVoiceCache();
+  }, []);
+
+  // **NEW: Monitor for voices becoming available and cache them automatically**
+  useEffect(() => {
+    const checkForVoices = () => {
+      const murfVoices: Array<{ voice_id: string; name: string }> = (window as any)?.murfVoices || [];
+      if (murfVoices.length > 0) {
+        // Check if we need to cache these voices
+        const existingCache = localStorage.getItem('murfVoicesCache');
+        if (!existingCache) {
+          console.log(`🎵 Voices became available, caching ${murfVoices.length} voices...`);
+          cacheVoicesFromAPI(murfVoices);
+        }
+      }
+    };
+
+    // Check immediately
+    checkForVoices();
+    
+    // Set up an interval to check for voices (they might load asynchronously)
+    const interval = setInterval(checkForVoices, 2000); // Check every 2 seconds
+    
+    // Clean up interval
+    return () => clearInterval(interval);
+  }, []);
 
   // Generate a temporary story ID for new stories to enable audio file storage
   useEffect(() => {
@@ -450,7 +673,7 @@ const CreateStoryScreen: React.FC = () => {
   const updateStoryData = (updates: Partial<StoryData>) => {
     setStoryData((prev) => {
       const newData = { ...prev, ...updates };
-
+      
       // If this is a new story and we haven't set original data yet, set it now
       if (!originalStoryData && !storyData.storyId) {
         setOriginalStoryData(initialStoryState);
@@ -1905,8 +2128,17 @@ const CreateStoryScreen: React.FC = () => {
                 <VoiceSelector
                   selectedVoice={storyData.selectedVoiceId}
                   onVoiceSelect={(voiceId) => {
-                    console.log("Voice selected:", voiceId);
                     updateStoryData({ selectedVoiceId: voiceId });
+                    
+                    // **NEW: Automatically cache the selected voice if we have its info**
+                    if (voiceId) {
+                      const murfVoices: Array<{ voice_id: string; name: string }> = (window as any)?.murfVoices || [];
+                      const selectedVoice = murfVoices.find(v => v.voice_id === voiceId);
+                      if (selectedVoice) {
+                        cacheVoice(selectedVoice);
+                        console.log(`🎵 Auto-cached selected voice: ${selectedVoice.name}`);
+                      }
+                    }
                   }}
                   className="max-w-4xl mx-auto"
                 />
@@ -2077,6 +2309,7 @@ const CreateStoryScreen: React.FC = () => {
                                     storyData.selectedVoiceId || ""
                                   )}
                                 </strong>
+
                               </p>
                             </div>
                           </div>
@@ -2116,6 +2349,8 @@ const CreateStoryScreen: React.FC = () => {
                             Regenerate Audio
                           </Button>
                         </div>
+
+
                       </div>
                     </CardContent>
                   </Card>
@@ -2130,12 +2365,13 @@ const CreateStoryScreen: React.FC = () => {
                             <h4 className="font-medium text-green-800">
                               Generated Audio
                             </h4>
-                            <p className="text-sm text-green-700">
-                              Voice used:{" "}
-                              <strong>
-                                {getVoiceName(generatedAudioVoiceId)}
-                              </strong>
-                            </p>
+                                                          <p className="text-sm text-green-700">
+                                Voice used:{" "}
+                                <strong>
+                                  {getVoiceName(generatedAudioVoiceId)}
+                                </strong>
+
+                              </p>
                           </div>
                         </div>
                       </CardContent>

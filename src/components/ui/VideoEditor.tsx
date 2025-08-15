@@ -315,6 +315,10 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const [isRestoringAudio, setIsRestoringAudio] = useState(false);
   const [audioRestored, setAudioRestored] = useState(false);
   const [transcriptRestored, setTranscriptRestored] = useState(false);
+  const [autoTranscriptGenerated, setAutoTranscriptGenerated] = useState(false);
+  const [isAutoGeneratingTranscripts, setIsAutoGeneratingTranscripts] = useState(false);
+  const [autoTranscriptProgress, setAutoTranscriptProgress] = useState("");
+  const [showCompletionMessage, setShowCompletionMessage] = useState(false);
   const [preGeneratedProcessed, setPreGeneratedProcessed] = useState(false);
   const [lastProcessedAudioChunksLength, setLastProcessedAudioChunksLength] =
     useState(0);
@@ -689,6 +693,11 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
         audio.load();
       });
+
+      // Basic error handling
+      audio.onerror = (e) => {
+        console.error(`❌ Audio playback error for ${mediaItem.name}:`, e);
+      };
 
       audioElementsRef.current.set(mediaId, audio);
       return audio;
@@ -1526,9 +1535,25 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     currentlyPlayingVideosRef.current = currentlyPlayingVideos;
   }, [currentlyPlayingVideos]);
 
+  // Preload audio chunks when layers change for better performance
+  useEffect(() => {
+    if (layers.length > 0 && mediaItems.length > 0) {
+      // Preload audio chunks in the background
+      preloadAudioChunks().catch(error => {
+        console.warn("⚠️ Failed to preload audio chunks:", error);
+      });
+    }
+  }, [layers, mediaItems]);
+
+
+
+
+
   // Update seekToTime to handle media seeking
   const seekToTime = async (newTime: number) => {
     const wasPlaying = isPlaying;
+    const previousTime = currentTime;
+    
     if (isPlaying) {
       pauseTimeline();
     }
@@ -1539,12 +1564,24 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       setIndicatorPosition(newPosition);
     }
 
-    // Handle audio and video seeking
-    currentlyPlayingAudios.forEach((audio) => {
-      audio.pause();
-      audio.currentTime = 0;
-    });
-    setCurrentlyPlayingAudios([]);
+    // Simple audio cleanup and restart
+    if (wasPlaying) {
+      // Stop all current audio
+      currentlyPlayingAudios.forEach((audio) => {
+        audio.pause();
+        audio.currentTime = 0;
+      });
+      setCurrentlyPlayingAudios([]);
+      
+      // Audio will be restarted by manageContinuousAudio in the next update
+    } else {
+      // Clean up audio elements when not playing
+      currentlyPlayingAudios.forEach((audio) => {
+        audio.pause();
+        audio.currentTime = 0;
+      });
+      setCurrentlyPlayingAudios([]);
+    }
 
     currentlyPlayingVideosRef.current.forEach((video) => {
       video.pause();
@@ -1647,6 +1684,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
 
 
+
+
   // Update updateTimeDisplay to include frame rendering and audio management
   const updateTimeDisplay = async (isPlaying: boolean) => {
     if (!isPlaying || totalDuration === 0) return;
@@ -1683,6 +1722,13 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         }
       }, 50); // Small delay to ensure state updates are processed
       
+      // Restart playback if it was playing
+      if (isPlaying) {
+        setTimeout(() => {
+          playTimeline();
+        }, 100); // Small delay to ensure state is properly reset
+      }
+      
       return;
     }
 
@@ -1690,7 +1736,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     setCurrentTime(clampedTime);
     renderPreviewFrame(clampedTime);
 
-    // Add continuous audio management during playback
+
 
     // Auto-scroll timeline to keep time indicator visible
     autoScrollTimeline();
@@ -1701,6 +1747,134 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       );
     }
   };
+
+
+
+
+
+  // Find the next audio item after the current one
+  const findNextAudioItem = (timelineItem: TimelineItem): TimelineItem | null => {
+    const allTimelineItems = layers.flatMap((layer) =>
+      layer.visible ? layer.items : []
+    );
+    
+    // Sort by start time to find the next one
+    const sortedItems = allTimelineItems.sort((a, b) => a.startTime - b.startTime);
+    
+    // Find the next audio item after the current one
+    return sortedItems.find(
+      (item) => {
+        const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
+        return mediaItem && 
+               (mediaItem.type === "voiceover" || mediaItem.type === "audio") &&
+               item.startTime > timelineItem.startTime;
+      }
+    ) || null;
+  };
+
+  // Start the next audio item
+  const startNextAudioItem = async (timelineItem: TimelineItem) => {
+    const mediaItem = mediaItems.find((m) => m.id === timelineItem.mediaId);
+    if (!mediaItem || (mediaItem.type !== "voiceover" && mediaItem.type !== "audio")) {
+      return;
+    }
+
+    try {
+      const audio = await loadAudioForPlayback(timelineItem.mediaId);
+      if (audio && !audio.ended && audio.paused) {
+        // Start from the beginning
+        audio.currentTime = 0;
+        
+        // Apply volume settings
+        const individualVolume = mediaItem.volume || 100;
+        let globalVolume = 100;
+        if (mediaItem.type === "voiceover") {
+          globalVolume = voiceoverVolume;
+        } else if (mediaItem.type === "audio") {
+          globalVolume = soundtrackVolume;
+        }
+        audio.volume = mediaItem.muted
+          ? 0
+          : (individualVolume * globalVolume) / 10000;
+
+        // Start playing
+        await audio.play();
+        console.log(`🎵 Started next audio chunk: ${mediaItem.name}`);
+        
+        // Add to currently playing audios
+        setCurrentlyPlayingAudios((prev) => {
+          if (!prev.includes(audio)) {
+            return [...prev, audio];
+          }
+          return prev;
+        });
+
+        // Set up advancement for this chunk too
+        audio.onended = () => {
+          console.log(`🎵 Audio chunk ended: ${mediaItem.name}`);
+          const nextItem = findNextAudioItem(timelineItem);
+          if (nextItem) {
+            startNextAudioItem(nextItem);
+          }
+        };
+      }
+    } catch (error) {
+      console.error(`❌ Failed to start next audio chunk ${mediaItem.name}:`, error);
+    }
+  };
+
+
+
+  // Preload audio chunks for better performance
+  const preloadAudioChunks = async () => {
+    const allTimelineItems = layers.flatMap((layer) =>
+      layer.visible ? layer.items : []
+    );
+    
+    const audioItems = allTimelineItems.filter((item) => {
+      const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
+      return mediaItem && (mediaItem.type === "voiceover" || mediaItem.type === "audio");
+    });
+
+    // Preload audio chunks in parallel (limit to 5 at a time to avoid overwhelming the system)
+    const batchSize = 5;
+    for (let i = 0; i < audioItems.length; i += batchSize) {
+      const batch = audioItems.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(async (item) => {
+          try {
+            await loadAudioForPlayback(item.mediaId);
+          } catch (error) {
+            console.warn(`⚠️ Failed to preload audio chunk: ${error}`);
+          }
+        })
+      );
+    }
+  };
+
+  // Clean up audio elements and ensure smooth transitions
+  const cleanupAudioElements = () => {
+    // Stop all currently playing audio elements
+    currentlyPlayingAudios.forEach((audio) => {
+      if (audio && !audio.paused) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+    });
+    
+    // Clear the currently playing audios array
+    setCurrentlyPlayingAudios([]);
+    
+    // Reset all audio elements to beginning
+    audioElementsRef.current.forEach((audio) => {
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+    });
+  };
+
+
 
   // Canvas interaction handlers
   const getCanvasCoordinates = (
@@ -3618,6 +3792,138 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     }
   };
 
+  // Function to automatically generate transcripts for all voiceover items
+  const autoGenerateTranscripts = async () => {
+    if (!storyId) {
+      console.log("⚠️ No story ID available for automatic transcript generation");
+      return;
+    }
+
+    // Prevent duplicate automatic transcript generation
+    if (autoTranscriptGenerated) {
+      console.log("✅ Automatic transcript generation already completed");
+      return;
+    }
+
+    // Get all voiceover items that don't already have transcripts
+    const voiceoverItems = mediaItems.filter(item => item.type === "voiceover");
+    const textLayers = layers.filter(layer => layer.type === "text");
+    
+    // Check which voiceover items already have transcripts
+    const voiceoverItemsWithTranscripts = new Set();
+    for (const layer of textLayers) {
+      for (const item of layer.items) {
+        const mediaItem = mediaItems.find(m => m.id === item.mediaId);
+        if (mediaItem && mediaItem.type === "voiceover") {
+          voiceoverItemsWithTranscripts.add(mediaItem.id);
+        }
+      }
+    }
+
+    const voiceoverItemsNeedingTranscripts = voiceoverItems.filter(
+      item => !voiceoverItemsWithTranscripts.has(item.id)
+    );
+
+    if (voiceoverItemsNeedingTranscripts.length === 0) {
+      console.log("✅ All voiceover items already have transcripts");
+      return;
+    }
+
+    console.log(`🎙️ AUTO-TRANSCRIPT: Found ${voiceoverItemsNeedingTranscripts.length} voiceover items needing transcripts`);
+
+    // Set progress state
+    setIsAutoGeneratingTranscripts(true);
+    setAutoTranscriptProgress(`Starting transcript generation for ${voiceoverItemsNeedingTranscripts.length} voiceover items...`);
+
+    // Generate transcripts for each voiceover item sequentially
+    for (const mediaItem of voiceoverItemsNeedingTranscripts) {
+      try {
+        console.log(`🎙️ AUTO-TRANSCRIPT: Generating transcript for "${mediaItem.name}"`);
+        setAutoTranscriptProgress(`Generating transcript for "${mediaItem.name}"...`);
+        
+        // Load the audio file from storage
+        let audioData: ArrayBuffer;
+
+        if (mediaItem.filePath.startsWith("blob:")) {
+          // Handle blob URLs
+          const response = await fetch(mediaItem.filePath);
+          audioData = await response.arrayBuffer();
+        } else {
+          // Load from electron storage
+          try {
+            audioData = await window.electronAPI.audio.loadAudioFile(
+              mediaItem.filePath
+            );
+          } catch (electronError) {
+            console.warn(`⚠️ Failed to load audio file for auto-transcript: ${electronError}`);
+            continue; // Skip this item and continue with the next one
+          }
+        }
+
+        // Detect MIME type based on file extension or default to mp3
+        const getAudioMimeType = (fileName: string): string => {
+          const extension = fileName.split(".").pop()?.toLowerCase();
+          const mimeTypes: { [key: string]: string } = {
+            mp3: "audio/mpeg",
+            wav: "audio/wav",
+            flac: "audio/flac",
+            m4a: "audio/mp4",
+            ogg: "audio/ogg",
+            webm: "audio/webm",
+          };
+          return mimeTypes[extension || ""] || "audio/mpeg";
+        };
+
+        // Create File object for API service with proper MIME type
+        const mimeType = getAudioMimeType(mediaItem.name);
+        const audioBlob = new Blob([audioData], { type: mimeType });
+        const audioFile = new File([audioBlob], mediaItem.name, {
+          type: mimeType,
+        });
+
+        console.log(`🎙️ AUTO-TRANSCRIPT: Calling API for "${mediaItem.name}"`);
+
+        // Call backend API for transcript generation
+        const transcript = await apiService.generateTranscript(
+          audioFile,
+          storyId,
+          mediaItem.id
+        );
+
+        console.log(`🎙️ AUTO-TRANSCRIPT: Received transcript for "${mediaItem.name}" with ${transcript.segments.length} segments`);
+
+        // Find the timeline item for this audio file to get its start time
+        const audioTimelineItem = timelineItems.find(item => item.mediaId === mediaItem.id);
+        const audioStartTime = audioTimelineItem?.startTime || 0;
+
+        console.log(`🎙️ AUTO-TRANSCRIPT: Creating text layers for "${mediaItem.name}" starting at ${audioStartTime}s`);
+
+        // Create text layer from transcript segments with proper time offset
+        createTextLayerFromTranscript(transcript, audioStartTime);
+
+        // Add a small delay between transcript generations to avoid overwhelming the API
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+      } catch (error) {
+        console.error(`❌ AUTO-TRANSCRIPT: Failed to generate transcript for "${mediaItem.name}":`, error);
+        setAutoTranscriptProgress(`Failed to generate transcript for "${mediaItem.name}" - continuing with next item...`);
+        // Continue with the next item instead of stopping the entire process
+        continue;
+      }
+    }
+
+    console.log("🎉 AUTO-TRANSCRIPT: Automatic transcript generation completed");
+    setAutoTranscriptGenerated(true);
+    setIsAutoGeneratingTranscripts(false);
+    setAutoTranscriptProgress("Automatic transcript generation completed!");
+    
+    // Show completion message briefly
+    setShowCompletionMessage(true);
+    setTimeout(() => {
+      setShowCompletionMessage(false);
+    }, 5000); // Hide after 5 seconds
+  };
+
   const renderTranscriptSelector = () => {
     const voiceoverItems = mediaItems.filter(
       (item) => item.type === "voiceover"
@@ -4744,6 +5050,13 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   const imageData = ctx.getImageData(0, 0, 1, 1);
                   if (imageData && imageData.data) {
                     console.log("✅ Canvas re-initialization successful on attempt", attemptCount + 1);
+                    
+                    // Start automatic transcript generation after successful canvas initialization
+                    setTimeout(() => {
+                      console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation...");
+                      autoGenerateTranscripts();
+                    }, 2000); // 2 second delay after canvas is ready
+                    
                     return; // Success, exit the retry loop
                   }
                 }
@@ -4968,10 +5281,22 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         loadAudioChunks()
           .then(() => {
             setAudioRestored(true);
+            
+            // Start automatic transcript generation after restoration is complete
+            setTimeout(() => {
+              console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation after restoration...");
+              autoGenerateTranscripts();
+            }, 3000); // 3 second delay after restoration
           })
           .catch(() => {
             // console.error("❌ Error loading audio chunks:", error);
             setAudioRestored(true); // Mark as complete even on error to prevent retry loop
+            
+            // Start automatic transcript generation even if restoration had errors
+            setTimeout(() => {
+              console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation after restoration (with errors)...");
+              autoGenerateTranscripts();
+            }, 3000); // 3 second delay after restoration
           })
           .finally(() => {
             setIsRestoringAudio(false);
@@ -5028,6 +5353,48 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     preGeneratedProcessed,
     lastProcessedAudioChunksLength,
   ]);
+
+  // Automatic transcript generation effect
+  useEffect(() => {
+    // Only trigger if we have audio chunks, story ID, and haven't already generated transcripts
+    if (
+      audioChunks?.length > 0 &&
+      storyId &&
+      !autoTranscriptGenerated &&
+      initialLoadComplete &&
+      !isLoading
+    ) {
+      // Add a delay to ensure everything is properly initialized
+      const timer = setTimeout(() => {
+        console.log("🎙️ AUTO-TRANSCRIPT: Triggering automatic transcript generation from useEffect...");
+        autoGenerateTranscripts();
+      }, 5000); // 5 second delay to ensure full initialization
+
+      return () => clearTimeout(timer);
+    }
+  }, [
+    audioChunks,
+    storyId,
+    autoTranscriptGenerated,
+    initialLoadComplete,
+    isLoading,
+    autoGenerateTranscripts
+  ]);
+
+  // Reset auto-transcript state when new audio chunks are added
+  useEffect(() => {
+    if (audioChunks?.length > 0) {
+      // Reset completion message when new audio chunks are available
+      setShowCompletionMessage(false);
+      
+      // Reset auto-transcript state when new audio chunks are added
+      // This allows users to regenerate transcripts for new content
+      if (audioChunks.length > lastProcessedAudioChunksLength) {
+        setAutoTranscriptGenerated(false);
+        setLastProcessedAudioChunksLength(audioChunks.length);
+      }
+    }
+  }, [audioChunks, autoTranscriptGenerated, lastProcessedAudioChunksLength]);
 
   // Get video aspect ratio class based on video style
   const getVideoAspectRatio = () => {
@@ -7754,6 +8121,34 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             {showTranscriptSelector && renderTranscriptSelector()}
             {showStockMediaTranscriptSelector && renderStockMediaTranscriptSelector()}
           </div>
+          
+          {/* Manual Auto-Transcript Trigger Button */}
+          <Button
+            size="sm"
+            onClick={() => {
+              if (autoTranscriptGenerated) {
+                // Reset state to allow regeneration
+                setAutoTranscriptGenerated(false);
+                setShowCompletionMessage(false);
+              }
+              autoGenerateTranscripts();
+            }}
+            disabled={isAutoGeneratingTranscripts}
+            className={`text-xs flex items-center justify-center ${
+              autoTranscriptGenerated 
+                ? "bg-green-600 hover:bg-green-700" 
+                : "bg-orange-600 hover:bg-orange-700"
+            }`}
+            title={autoTranscriptGenerated ? "Regenerate transcripts" : "Manually trigger transcript generation"}
+          >
+            {isAutoGeneratingTranscripts ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : autoTranscriptGenerated ? (
+              <RefreshCw className="w-4 h-4" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+          </Button>
           <Button
             size="sm"
             onClick={handleFetchStockMedia}
@@ -7948,7 +8343,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
   // Render timeline section
   const renderTimelineSection = () => (
-    <div className="h-[220px] bg-white border-t border-gray-200 flex select-none">
+    <div className="h-[130px] mt-[90px] bg-white border-t border-gray-200 flex select-none">
       <style>{`
         .slider::-webkit-slider-thumb {
           appearance: none;
@@ -8252,6 +8647,31 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
   return (
     <div className={`h-screen bg-gray-50 flex flex-col ${className}`}>
+      {/* Automatic Transcript Generation Progress Indicator */}
+      {isAutoGeneratingTranscripts && (
+        <div className="fixed top-4 right-4 z-50 bg-blue-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-md">
+          <div className="flex items-center space-x-3">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <div className="flex-1">
+              <h4 className="font-medium text-sm">Auto-Generating Transcripts</h4>
+              <p className="text-xs text-blue-100 mt-1">{autoTranscriptProgress}</p>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Automatic Transcript Generation Completion Message */}
+      {showCompletionMessage && (
+        <div className="fixed top-4 right-4 z-50 bg-green-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-md">
+          <div className="flex items-center space-x-3">
+            <CheckCircle className="w-5 h-5" />
+            <div className="flex-1">
+              <h4 className="font-medium text-sm">Transcripts Generated!</h4>
+              <p className="text-xs text-green-100 mt-1">All voiceover transcripts have been automatically generated.</p>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between h-[70px]">
         <div className="flex items-center space-x-4">
           <Button
@@ -8302,12 +8722,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       <div className="flex-1 flex max-h-[calc(100vh-70px-220px)]">
         {renderMediaPanel()}
 
-        <div className="flex-1 flex flex-col bg-gray-900">
+        <div className="flex-1 relative flex flex-col bg-gray-900 min-h-[500px]">
           <div className="flex-1 flex items-center justify-center p-4">
             <Card
               className={`w-full max-w-4xl ${getVideoAspectRatio()} bg-black border-gray-600 overflow-hidden rounded-none`}
             >
-              <CardContent className="p-0 h-full w-full flex items-center justify-center bg-black">
+              <CardContent className="p-0 h-[330px] w-full flex items-center justify-center bg-black">
                 <canvas
                   ref={previewCanvasRef}
                   className="max-w-full max-h-full w-full h-full object-contain"
@@ -8328,22 +8748,24 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
           {/* Selection Info Panel */}
 
-          <div className="bg-gray-800 p-4 flex items-center justify-center space-x-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handlePlayPause}
-              disabled={totalDuration === 0}
-              className="text-white hover:bg-gray-700 disabled:opacity-50"
-            >
-              {isPlaying ? (
-                <Pause className="w-5 h-5" />
-              ) : (
-                <Play className="w-5 h-5" />
-              )}
-            </Button>
-            <div className="text-white text-sm">
-              {formatTime(currentTime)} / {formatTime(totalDuration)}
+          <div className="absolute bottom-0 left-0 right-0 bg-gray-700 h-12 flex items-center justify-center px-4">
+            <div className="flex items-center space-x-4">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handlePlayPause}
+                disabled={totalDuration === 0}
+                className="text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {isPlaying ? (
+                  <Pause className="w-5 h-5" />
+                ) : (
+                  <Play className="w-5 h-5" />
+                )}
+              </Button>
+              <div className="text-white text-sm">
+                {formatTime(currentTime)} / {formatTime(totalDuration)}
+              </div>
             </div>
           </div>
         </div>
