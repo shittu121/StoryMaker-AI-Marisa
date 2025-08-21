@@ -319,6 +319,10 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const [isAutoGeneratingTranscripts, setIsAutoGeneratingTranscripts] = useState(false);
   const [autoTranscriptProgress, setAutoTranscriptProgress] = useState("");
   const [showCompletionMessage, setShowCompletionMessage] = useState(false);
+  // Auto Stock Media generation state
+  const [isAutoGeneratingStockMedia, setIsAutoGeneratingStockMedia] = useState(false);
+  const [autoStockMediaGenerated, setAutoStockMediaGenerated] = useState(false);
+  const [autoStockMediaProgress, setAutoStockMediaProgress] = useState("");
   const [preGeneratedProcessed, setPreGeneratedProcessed] = useState(false);
   const [lastProcessedAudioChunksLength, setLastProcessedAudioChunksLength] =
     useState(0);
@@ -1694,41 +1698,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     const elapsed = (now - startTimeRef.current) / 1000;
     const newTime = pausedTimeRef.current + elapsed;
     
-    // Check if we've reached the end of the timeline
+    // If we've reached the end of the timeline, stop (do not loop)
     if (newTime >= totalDuration) {
-      console.log("🔄 Timeline reached end, resetting to beginning...");
-      
-      // Pause playback first
       pauseTimeline();
-      
-      // Reset all time-related state
-      setCurrentTime(0);
-      pausedTimeRef.current = 0;
-      startTimeRef.current = performance.now();
-      
-      // Force seek to beginning
-      await seekToTime(0);
-      
-      // Ensure indicator position is reset to zero with proper calculation
-      setTimeout(() => {
-        if (timeRulerRef.current && totalDuration > 0) {
-          const rulerWidth = timeRulerRef.current.clientWidth;
-          const newPosition = (0 / totalDuration) * rulerWidth;
-          console.log(`🔄 Resetting indicator position to: ${newPosition}px (0/${totalDuration}s)`);
-          setIndicatorPosition(newPosition);
-        } else {
-          console.log("🔄 Setting indicator position to 0 (fallback)");
-          setIndicatorPosition(0);
-        }
-      }, 50); // Small delay to ensure state updates are processed
-      
-      // Restart playback if it was playing
-      if (isPlaying) {
-        setTimeout(() => {
-          playTimeline();
-        }, 100); // Small delay to ensure state is properly reset
+      setCurrentTime(totalDuration);
+      pausedTimeRef.current = totalDuration;
+      if (timeRulerRef.current && totalDuration > 0) {
+        const rulerWidth = timeRulerRef.current.clientWidth;
+        const newPosition = (totalDuration / totalDuration) * rulerWidth;
+        setIndicatorPosition(newPosition);
       }
-      
       return;
     }
 
@@ -1747,10 +1726,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       );
     }
   };
-
-
-
-
 
   // Find the next audio item after the current one
   const findNextAudioItem = (timelineItem: TimelineItem): TimelineItem | null => {
@@ -3099,6 +3074,44 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     }, 100);
   };
 
+  // Automatically generate stock media for all transcript segments across all voiceover clips
+  const autoGenerateStockMediaFromTranscripts = async () => {
+    if (!storyId) return;
+    if (isAutoGeneratingStockMedia || autoStockMediaGenerated) return;
+
+    // Gather transcript segments from existing text layers
+    const textLayers = layers.filter((layer) => layer.type === "text");
+    const segments: Array<{ id: number; start: number; end: number; text: string }>= [];
+
+    for (const layer of textLayers) {
+      for (const item of layer.items) {
+        const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
+        if (mediaItem?.type === "text" && mediaItem.text) {
+          segments.push({
+            id: Number(String(item.id).replace(/\D/g, "")) || segments.length + 1,
+            start: item.startTime,
+            end: item.startTime + item.duration,
+            text: mediaItem.text,
+          });
+        }
+      }
+    }
+
+    if (segments.length === 0) return;
+
+    try {
+      setIsAutoGeneratingStockMedia(true);
+      setAutoStockMediaProgress(`Generating stock media for ${segments.length} transcript segments...`);
+      await handleStockMediaTranscriptSelect(segments);
+      setAutoStockMediaGenerated(true);
+      setAutoStockMediaProgress("Stock media generation completed!");
+    } catch (error) {
+      console.warn("⚠️ AUTO-STOCK: Failed to generate stock media:", error);
+    } finally {
+      setIsAutoGeneratingStockMedia(false);
+    }
+  };
+
   // Function to create stocks layer from Pexels media
   // Reusable function to import a single file (extracted from handleFileSelect)
   const importSingleFile = async (
@@ -3782,6 +3795,9 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
       // Create text layer from transcript segments with proper time offset
       createTextLayerFromTranscript(transcript, audioStartTime);
+
+      // Do not auto-generate stock media here; keep flows decoupled
+      // Users can manually invoke stock generation from the Stock Media panel
     } catch (error) {
       console.error("❌ Failed to generate transcript:", error);
       setError(
@@ -3916,7 +3932,14 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     setAutoTranscriptGenerated(true);
     setIsAutoGeneratingTranscripts(false);
     setAutoTranscriptProgress("Automatic transcript generation completed!");
-    
+
+    // After transcripts finish, auto-generate stock media without modifying transcript items
+    try {
+      await autoGenerateStockMediaFromTranscripts();
+    } catch (err) {
+      console.warn("⚠️ AUTO-STOCK: Failed to auto-generate stock media after transcripts:", err);
+    }
+
     // Show completion message briefly
     setShowCompletionMessage(true);
     setTimeout(() => {
@@ -6622,6 +6645,34 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 audio.currentTime = audioOffset;
                 await audio.play();
                 activeAudios.push(audio);
+
+                // If this is a voiceover paragraph, pause at the end of the clip
+                if (mediaItem.type === "voiceover") {
+                  audio.onended = () => {
+                    const endTime = item.startTime + item.duration;
+                    // Determine if the next voiceover item is contiguous (same paragraph)
+                    const nextItem = findNextAudioItem(item);
+                    const gapThresholdSeconds = 0.2; // treat <=200ms gap as continuous
+                    if (
+                      nextItem &&
+                      Math.abs(nextItem.startTime - endTime) <= gapThresholdSeconds
+                    ) {
+                      // Continue playing seamlessly into the next chunk
+                      startNextAudioItem(nextItem);
+                      return;
+                    }
+
+                    // Otherwise, stop at the end of the paragraph boundary
+                    setCurrentTime(endTime);
+                    pausedTimeRef.current = endTime;
+                    if (timeRulerRef.current && totalDuration > 0) {
+                      const rulerWidth = timeRulerRef.current.clientWidth;
+                      const newPosition = (endTime / totalDuration) * rulerWidth;
+                      setIndicatorPosition(newPosition);
+                    }
+                    pauseTimeline();
+                  };
+                }
               } else {
                 console.warn(
                   `❌ Failed to load audio element for: ${mediaItem.id}`
@@ -7501,7 +7552,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     item: TimelineItem
   ) => {
     e.stopPropagation();
-    if (isPlaying) pauseTimeline();
 
     const layer = layers.find((l) => l.items.some((i) => i.id === item.id));
     if (layer?.locked) return;
@@ -8231,7 +8281,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     direction: "left" | "right"
   ) => {
     e.stopPropagation();
-    if (isPlaying) pauseTimeline();
+    // Do not pause playback on resize start; allow live resize while playing
 
     const layer = layers.find((l) => l.items.some((i) => i.id === item.id));
     if (layer?.locked) return;
@@ -8655,6 +8705,17 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             <div className="flex-1">
               <h4 className="font-medium text-sm">Auto-Generating Transcripts</h4>
               <p className="text-xs text-blue-100 mt-1">{autoTranscriptProgress}</p>
+            </div>
+          </div>
+        </div>
+      )}
+      {isAutoGeneratingStockMedia && (
+        <div className="fixed top-16 right-4 z-50 bg-purple-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-md">
+          <div className="flex items-center space-x-3">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <div className="flex-1">
+              <h4 className="font-medium text-sm">Auto-Generating Stock Media</h4>
+              <p className="text-xs text-purple-100 mt-1">{autoStockMediaProgress}</p>
             </div>
           </div>
         </div>
