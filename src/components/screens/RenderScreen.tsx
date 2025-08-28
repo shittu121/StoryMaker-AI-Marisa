@@ -96,38 +96,79 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
       case "rendering":
         return (
           <div className="text-center">
-            <Loader2 className="w-10 h-10 mx-auto animate-spin text-blue-600 mb-3" />
-            <h2 className="text-xl font-semibold mb-2">Rendering Video...</h2>
-            <p className="text-gray-500 mb-4">
-              Please wait, this may take a few moments.
+            <Loader2 className="w-10 h-10 mx-auto animate-spin text-blue-600 mb-4" />
+            <h2 className="text-xl font-semibold mb-2">Rendering Your Video...</h2>
+            <p className="text-gray-500 mb-6">
+              Please wait while we process your video. This may take a few moments depending on the length and complexity.
             </p>
-            <Progress value={progress} className="w-full" />
-            <p className="text-base font-mono mt-3">{progress.toFixed(2)}%</p>
+            <div className="w-full max-w-md mx-auto">
+              <Progress value={progress} className="w-full mb-3" />
+              <p className="text-base font-mono text-blue-600">{progress.toFixed(1)}% Complete</p>
+            </div>
+            <div className="mt-6 text-sm text-gray-400">
+              <p>Processing timeline, media files, and text overlays...</p>
+            </div>
           </div>
         );
       case "complete":
         return (
           <div className="text-center">
             <CheckCircle className="w-10 h-10 mx-auto text-green-600 mb-3" />
-            <p className="text-gray-500 mb-4">
-              Preview your video below and save it to your computer.
+            <h2 className="text-xl font-semibold mb-2">Video Render Complete!</h2>
+            <p className="text-gray-500 mb-6">
+              Your video has been successfully rendered. Preview it below and save it to your computer.
             </p>
             {renderedVideoUrl && (
-              <video
-                src={renderedVideoUrl}
-                controls
-                className="w-full rounded-lg mb-4"
-                onError={(e) => {
-                  console.error('Video loading error:', e);
-                  console.error('Video URL:', renderedVideoUrl);
-                }}
-              />
+              <div className="w-full max-w-4xl mx-auto mb-4">
+                <video
+                  src={renderedVideoUrl}
+                  controls
+                  className="w-full h-auto max-h-[70vh] rounded-lg shadow-lg"
+                  style={{
+                    objectFit: 'contain',
+                    maxWidth: '100%'
+                  }}
+                  onError={(e) => {
+                    console.error('Video loading error:', e);
+                    console.error('Video URL:', renderedVideoUrl);
+                  }}
+                />
+              </div>
             )}
-            <div className="flex space-x-3 justify-center">
-              <Button onClick={handleSaveVideo} size="lg">
+            <div className="flex flex-col sm:flex-row gap-3 justify-center items-center mt-6">
+              <Button onClick={handleSaveVideo} size="lg" className="w-full sm:w-auto">
                 <Download className="w-5 h-5 mr-2" />
-                Save Video
+                Save Video to Computer
               </Button>
+              <Button
+                variant="outline"
+                onClick={onBackToEditor}
+                size="lg"
+                className="w-full sm:w-auto"
+              >
+                Back to Editor
+              </Button>
+            </div>
+            <p className="text-sm text-gray-400 mt-4">
+              The video will be saved to your Downloads folder
+            </p>
+          </div>
+        );
+      case "error":
+        return (
+          <div className="text-center">
+            <XCircle className="w-10 h-10 mx-auto text-red-600 mb-4" />
+            <h2 className="text-xl font-semibold mb-2">Video Render Failed</h2>
+            <p className="text-gray-500 mb-4">
+              An error occurred while rendering your video. Please check the details below and try again.
+            </p>
+            <Card className="bg-red-50 border-red-200 text-red-800 p-4 text-left max-w-2xl mx-auto">
+              <h3 className="font-semibold mb-2">Error Details:</h3>
+              <pre className="whitespace-pre-wrap font-mono text-sm overflow-auto max-h-40">
+                {errorMessage}
+              </pre>
+            </Card>
+            <div className="mt-6">
               <Button
                 variant="outline"
                 onClick={onBackToEditor}
@@ -138,21 +179,6 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
             </div>
           </div>
         );
-      case "error":
-        return (
-          <div className="text-center">
-            <XCircle className="w-10 h-10 mx-auto text-red-600 mb-3" />
-            <h2 className="text-xl font-semibold mb-2">Render Failed</h2>
-            <p className="text-gray-500 mb-3">
-              An error occurred during rendering.
-            </p>
-            <Card className="bg-red-50 text-red-800 p-3 text-left">
-              <pre className="whitespace-pre-wrap font-mono text-sm">
-                {errorMessage}
-              </pre>
-            </Card>
-          </div>
-        );
     }
   };
 
@@ -160,10 +186,10 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className=" flex flex-col items-center justify-center"
+      className="min-h-screen flex flex-col items-center justify-center p-4 bg-gray-50"
     >
-      <Card className="w-full max-w-4xl">
-        <CardContent className="p-6">{renderContent()}</CardContent>
+      <Card className="w-full max-w-6xl">
+        <CardContent className="p-8">{renderContent()}</CardContent>
       </Card>
     </motion.div>
   );

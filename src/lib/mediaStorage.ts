@@ -50,15 +50,15 @@ class MediaStorageService {
   }
 
   /**
-   * Get thumbnail URL - use base64 for images, blob URL for videos
+   * Get thumbnail URL - use base64 for images, file path for videos
    */
   async getThumbnailUrl(relativePath: string, type: 'image' | 'video'): Promise<string> {
     if (type === 'image') {
-      // For images, use base64 data URL for production compatibility
+      // For images, always use base64 data URL for production compatibility
       return this.loadImageAsBase64(relativePath);
     } else {
-      // For videos, still use blob URL (they need processing)
-      return this.loadMediaFile(relativePath);
+      // For videos, use base64 as well to avoid blob URLs
+      return this.loadImageAsBase64(relativePath);
     }
   }
 
@@ -96,7 +96,7 @@ class MediaStorageService {
         // For images, determine extension from originalUrl or default to .jpg
         const extension = originalUrl.includes('.png') ? '.png' : '.jpg';
         fileName = `pexels_photo_${pexelsId}_${mediaId}${extension}`;
-        fileType = extension === '.png' ? 'image/png' : 'image/jpeg';
+        fileType = extension === '.png' ? 'image/png' : 'image/jpg';
       }
 
       console.log(`💾 Generated filename for ${type} ${mediaId}: ${fileName}`);
@@ -132,14 +132,14 @@ class MediaStorageService {
   }
 
   /**
-   * Load a media file from the filesystem and return as blob URL or local file URL
+   * Load a media file from the filesystem and return as base64 data URL
+   * Falls back to file path for large files to prevent memory issues
    */
   async loadMediaFile(relativePath: string): Promise<string> {
     if (!this.isElectron()) {
       throw new Error('Media storage requires Electron environment');
     }
 
-    // For videos and other files, use blob URL
     try {
       const result = await this.getElectronAPI().media.loadMediaFile(relativePath);
       
@@ -147,10 +147,16 @@ class MediaStorageService {
         throw new Error(result?.error || 'Failed to load media file');
       }
 
-      // Convert uint8Array back to blob and create object URL
-      const uint8Array = new Uint8Array(result.data);
-      const blob = new Blob([uint8Array]);
-      return URL.createObjectURL(blob);
+      // Check if the result is a file path (for large files) or buffer data
+      if (result.isFilePath) {
+        console.log(`📁 Large media file detected, using file path: ${result.filePath}`);
+        return `file://${result.filePath}`;
+      } else {
+        console.log(`📄 Small media file, converting buffer to base64 (${result.size} bytes)`);
+        // Convert buffer to base64
+        const base64 = Buffer.from(result.data).toString('base64');
+        return `data:application/octet-stream;base64,${base64}`;
+      }
     } catch (error) {
       console.error('Error loading media file:', error);
       throw error;
@@ -159,6 +165,7 @@ class MediaStorageService {
 
   /**
    * Load an image as base64 data URL for production compatibility
+   * Falls back to file path for large files to prevent memory issues
    */
   async loadImageAsBase64(relativePath: string): Promise<string> {
     if (!this.isElectron()) {
@@ -172,7 +179,14 @@ class MediaStorageService {
         throw new Error(result?.error || 'Failed to load image as base64');
       }
 
-      return result.dataUrl;
+      // Check if the result is a file path (for large files) or base64 data
+      if (result.isFilePath) {
+        console.log(`📁 Large file detected, using file path: ${result.dataUrl}`);
+        return result.dataUrl; // This will be a file:// URL
+      } else {
+        console.log(`📄 Small file, using base64 data (${result.size} bytes)`);
+        return result.dataUrl; // This will be a data: URL
+      }
     } catch (error) {
       console.error('Error loading image as base64:', error);
       throw error;

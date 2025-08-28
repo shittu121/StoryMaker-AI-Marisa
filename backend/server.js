@@ -4,6 +4,11 @@ require('dotenv').config();
 // - MURF_API_KEY: Murf.ai API key for text-to-speech
 // - JWT_SECRET: JWT secret for authentication
 // - DB_HOST, DB_USER, DB_PASSWORD, DB_NAME: Database configuration
+
+// Memory optimization
+const v8 = require('v8');
+v8.setFlagsFromString('--max-old-space-size=4096');
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -49,7 +54,7 @@ app.use(helmet({
 app.use(cors({
     origin: process.env.NODE_ENV === 'production'
         ? ['https://storymaker.nocodelauncher.com', 'https://strorymaker.nocodelauncher.com']
-        : ['http://localhost:5173', 'http://localhost:5000'],
+        : ['http://localhost:5173', 'http://localhost:5000', 'http://localhost:5555'],
     credentials: true
 }));
 
@@ -64,9 +69,9 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Body parsing middleware with increased limits for image processing
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Request logging middleware
 app.use((req, res, next) => {

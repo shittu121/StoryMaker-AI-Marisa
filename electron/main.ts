@@ -407,13 +407,34 @@ ipcMain.handle("media:loadMediaFile", async (_event, relativePath) => {
       };
     }
     
+    // Get file stats to check size before loading
+    const stats = await fs.stat(fullPath);
+    const fileSizeInMB = stats.size / (1024 * 1024);
+    
+    console.log(`📊 Media file size: ${fileSizeInMB.toFixed(2)} MB`);
+    
+    // Memory protection: Don't load files larger than 100MB into memory
+    const MAX_FILE_SIZE_MB = 100;
+    if (fileSizeInMB > MAX_FILE_SIZE_MB) {
+      console.warn(`⚠️ Media file too large (${fileSizeInMB.toFixed(2)} MB), returning file path instead of buffer`);
+      return {
+        success: true,
+        data: null,
+        filePath: fullPath,
+        isFilePath: true,
+        size: stats.size
+      };
+    }
+    
     const buffer = await fs.readFile(fullPath);
     console.log(`✅ Loaded media file: ${relativePath} (${buffer.length} bytes)`);
     
     // Return the expected object structure with success flag and data
     return {
       success: true,
-      data: buffer
+      data: buffer,
+      isFilePath: false,
+      size: buffer.length
     };
   } catch (error) {
     console.error(`❌ Failed to load media file ${relativePath}:`, error);
@@ -434,7 +455,7 @@ ipcMain.handle("media:fileExists", async (_event, relativePath) => {
   }
 });
 
-// New IPC handler for loading images as base64
+// New IPC handler for loading images as base64 with memory protection
 ipcMain.handle("media:loadImageAsBase64", async (_event, relativePath) => {
   try {
     console.log(`📁 Loading image as base64: ${relativePath}`);
@@ -451,7 +472,40 @@ ipcMain.handle("media:loadImageAsBase64", async (_event, relativePath) => {
       };
     }
     
+    // Get file stats to check size before loading
+    const stats = await fs.stat(fullPath);
+    const fileSizeInMB = stats.size / (1024 * 1024);
+    
+    console.log(`📊 File size: ${fileSizeInMB.toFixed(2)} MB`);
+    
+    // Memory protection: Don't load files larger than 50MB into memory
+    const MAX_FILE_SIZE_MB = 50;
+    if (fileSizeInMB > MAX_FILE_SIZE_MB) {
+      console.warn(`⚠️ File too large (${fileSizeInMB.toFixed(2)} MB), returning file path instead of base64`);
+      return {
+        success: true,
+        dataUrl: `file://${fullPath}`,
+        mimeType: 'application/octet-stream',
+        size: stats.size,
+        isFilePath: true
+      };
+    }
+    
+    // For smaller files, load as base64
     const buffer = await fs.readFile(fullPath);
+    
+    // Additional safety check: Don't convert to string if buffer is too large
+    if (buffer.length > 50 * 1024 * 1024) { // 50MB in bytes
+      console.warn(`⚠️ Buffer too large (${buffer.length} bytes), returning file path instead of base64`);
+      return {
+        success: true,
+        dataUrl: `file://${fullPath}`,
+        mimeType: 'application/octet-stream',
+        size: buffer.length,
+        isFilePath: true
+      };
+    }
+    
     const base64 = buffer.toString('base64');
     
     // Determine MIME type from file extension
@@ -471,7 +525,8 @@ ipcMain.handle("media:loadImageAsBase64", async (_event, relativePath) => {
       success: true,
       dataUrl: dataUrl,
       mimeType: mimeType,
-      size: buffer.length
+      size: buffer.length,
+      isFilePath: false
     };
   } catch (error) {
     console.error(`❌ Failed to load image as base64 ${relativePath}:`, error);
@@ -881,9 +936,9 @@ ipcMain.on('start-render', (event, videoAssets) => {
         console.log(`[FONT SIZE] ${mediaItem.id}: USING OPTIMAL SIZE: ${optimalFontSize}px (no artificial min/max constraints)`);
         
         // Ensure reasonable bounds only if the calculation goes extreme
-        if (fontSize < 24) {
-          console.log(`[FONT SIZE] ${mediaItem.id}: WARNING: Calculated fontSize too small (${fontSize}px), forcing to 24px`);
-          fontSize = 24;
+        if (fontSize < 32) {
+          console.log(`[FONT SIZE] ${mediaItem.id}: WARNING: Calculated fontSize too small (${fontSize}px), forcing to 32px`);
+          fontSize = 32;
         }
         if (fontSize > 200) {
           fontSize = 200;
@@ -967,6 +1022,24 @@ ipcMain.on('start-render', (event, videoAssets) => {
           console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - textX=${textX}px (centerX=${centerX}px - maxWidth/2)`);
         }
         
+        // Ensure text is visible within video bounds
+        if (textX < 0) {
+          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textX too small (${textX}px), forcing to 10px`);
+          textX = 10;
+        }
+        if (textY < 0) {
+          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textY too small (${textY}px), forcing to 10px`);
+          textY = 10;
+        }
+        if (textX + (itemWidth * 0.8) > width) {
+          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textX too large (${textX}px), adjusting`);
+          textX = width - (itemWidth * 0.8);
+        }
+        if (textY + (itemHeight * 0.8) > height) {
+          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textY too large (${textY}px), adjusting`);
+          textY = height - (itemHeight * 0.8);
+        }
+        
         // Final positioning summary
         console.log(`[TEXT POSITION] ${mediaItem.id}: FINAL POSITION textX=${textX}px, textY=${textY}px`);
         console.log(`[TEXT POSITION] ${mediaItem.id}: AREA BOUNDS: (${itemX}, ${itemY}) to (${itemX + itemWidth}, ${itemY + itemHeight})`);
@@ -978,8 +1051,8 @@ ipcMain.on('start-render', (event, videoAssets) => {
         console.log(`[TEXT RENDERING] Rendering text: ${mediaItem.id}`);
         
         // Build comprehensive text filter matching preview algorithm
-        // Use the escaped text instead of original text content
-        let textFilter = `drawtext=text='${escapedText}'`;
+        // Use the wrapped text for proper line breaks
+        let textFilter = `drawtext=text='${wrappedText}'`;
         
         // Font properties
         textFilter += `:fontsize=${fontSize}`;
@@ -1029,16 +1102,15 @@ ipcMain.on('start-render', (event, videoAssets) => {
         }
         
         // Word wrapping already handled above in the font calculation
-        // Use the wrappedText that was already calculated
-        textFilter = textFilter.replace(`text='${escapedText}'`, `text='${wrappedText}'`);
+        // We're already using wrappedText in the initial filter
         
         // Don't use FFmpeg's box parameter - it only creates tight text bounds
         // Instead, we'll create a separate background rectangle filter that fills entire area
         console.log(`[TEXT BACKGROUND] ${mediaItem.id}: Not using box parameter - will create separate background rectangle`);
         
         // Text shadow for readability (simulate preview shadow)
-        // Note: Some FFmpeg versions don't support shadow parameters, so we'll skip them for now
-        // textFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
+        // Add shadow for better text visibility
+        textFilter += `:shadowcolor=black:shadowx=2:shadowy=2:shadowalpha=0.8`;
         
         // Note: enable parameter is not supported in drawtext filter
         // We'll handle timing through the filter chain instead
@@ -1145,10 +1217,50 @@ ipcMain.on('start-render', (event, videoAssets) => {
     '-y', outputPath
   );
 
+  // Validate FFmpeg command before execution
+  const filterComplexString = filterComplex.join(';');
+  
   console.log(`[FFMPEG] Timeline-based command: ffmpeg ${ffmpegArgs.join(' ')}`);
   console.log(`[FFMPEG] Video: ${width}x${height}, Duration: ${totalDuration}s, Audio segments: ${audioSegments.length}`);
-  console.log(`[FFMPEG] Filter complex length: ${filterComplex.join(';').length} characters`);
-  console.log(`[FFMPEG] Filter complex preview: ${filterComplex.join(';').substring(0, 500)}...`);
+  console.log(`[FFMPEG] Filter complex length: ${filterComplexString.length} characters`);
+  console.log(`[FFMPEG] Filter complex preview: ${filterComplexString.substring(0, 500)}...`);
+  
+  // Debug: Log command structure
+  console.log(`[FFMPEG DEBUG] Command structure:`);
+  console.log(`[FFMPEG DEBUG] - Inputs: ${inputs.length} input files`);
+  console.log(`[FFMPEG DEBUG] - Filter complex: ${filterComplex.length} filters`);
+  console.log(`[FFMPEG DEBUG] - Audio segments: ${audioSegments.length} audio streams`);
+  console.log(`[FFMPEG DEBUG] - Output: ${outputPath}`);
+  console.log(`[FFMPEG DEBUG] - Video dimensions: ${width}x${height}`);
+  console.log(`[FFMPEG DEBUG] - Duration: ${totalDuration}s`);
+  
+  // Debug: Log each input file
+  inputs.forEach((input, index) => {
+    if (index % 2 === 1) { // Skip the '-i' flags, only log the file paths
+      console.log(`[FFMPEG DEBUG] - Input ${Math.floor(index/2)}: ${input}`);
+    }
+  });
+  
+  // Validate inputs
+  if (inputs.length === 0) {
+    console.error('[FFMPEG] No input files specified');
+    event.sender.send('render-progress', { error: 'No input files found for rendering. Please add some media to your timeline.' });
+    return;
+  }
+  
+  // Validate filter complex
+  if (filterComplexString.length === 0) {
+    console.error('[FFMPEG] No filter complex specified');
+    event.sender.send('render-progress', { error: 'No video filters specified. Please add some content to your timeline.' });
+    return;
+  }
+  
+  // Check for common filter complex issues
+  if (filterComplexString.includes('undefined') || filterComplexString.includes('null')) {
+    console.error('[FFMPEG] Filter complex contains undefined/null values');
+    event.sender.send('render-progress', { error: 'Invalid filter parameters detected. Please check your timeline items.' });
+    return;
+  }
 
   // Check if FFmpeg is available
   if (!ffmpegPath) {
@@ -1156,6 +1268,24 @@ ipcMain.on('start-render', (event, videoAssets) => {
     event.sender.send('render-progress', { error: 'FFmpeg not available. Please restart the application.' });
     return;
   }
+  
+  // Create a simple fallback command for basic rendering
+  const createSimpleFallbackCommand = () => {
+    console.log('[FFMPEG] Creating simple fallback command...');
+    
+    // Simple command: just create a black video with the specified duration
+    const simpleArgs = [
+      '-f', 'lavfi',
+      '-i', `color=black:size=${width}x${height}:duration=${totalDuration}:rate=30`,
+      '-c:v', 'libx264',
+      '-preset', 'medium',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-y', outputPath
+    ];
+    
+    return simpleArgs;
+  };
 
   // --- Execute FFMPEG ---
   const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
@@ -1166,9 +1296,14 @@ ipcMain.on('start-render', (event, videoAssets) => {
   let detectedDuration = 0;
   let lastProgress = 0;
 
+  let ffmpegErrorOutput = '';
+  
   ffmpegProcess.stderr.on('data', (data: any) => {
     const output = data.toString();
     console.log(`[FFMPEG STDErr]: ${output}`);
+    
+    // Collect error output for debugging
+    ffmpegErrorOutput += output;
     
     // Parse progress and send to renderer
     // Look for duration in format: "Duration: 00:00:30.00, start: 0.000000, bitrate: 0 kb/s"
@@ -1199,7 +1334,34 @@ ipcMain.on('start-render', (event, videoAssets) => {
       event.sender.send('render-progress', { filePath: outputPath });
     } else {
       console.error(`[FFMPEG] Exited with error code ${code}`);
-      event.sender.send('render-progress', { error: `FFMPEG exited with code ${code}` });
+      console.error(`[FFMPEG] Error output: ${ffmpegErrorOutput}`);
+      
+      // Try fallback simple render if complex render failed
+      if (code !== 0 && !ffmpegErrorOutput.includes('fallback_attempted')) {
+        console.log('[FFMPEG] Complex render failed, trying simple fallback...');
+        
+        const simpleArgs = createSimpleFallbackCommand();
+        const fallbackProcess = spawn(ffmpegPath, simpleArgs);
+        
+        fallbackProcess.stderr.on('data', (data: any) => {
+          console.log(`[FFMPEG FALLBACK]: ${data.toString()}`);
+        });
+        
+        fallbackProcess.on('close', (fallbackCode: number) => {
+          if (fallbackCode === 0) {
+            console.log(`[FFMPEG] Fallback render completed successfully. Output: ${outputPath}`);
+            event.sender.send('render-progress', { filePath: outputPath });
+          } else {
+            console.error(`[FFMPEG] Fallback render also failed with code ${fallbackCode}`);
+            const errorMessage = `FFMPEG complex render failed with code ${code}\n\nComplex command: ffmpeg ${ffmpegArgs.join(' ')}\n\nComplex error details:\n${ffmpegErrorOutput}\n\nFallback render also failed with code ${fallbackCode}`;
+            event.sender.send('render-progress', { error: errorMessage });
+          }
+        });
+      } else {
+        // Create a detailed error message
+        const errorMessage = `FFMPEG exited with code ${code}\n\nCommand: ffmpeg ${ffmpegArgs.join(' ')}\n\nError details:\n${ffmpegErrorOutput}`;
+        event.sender.send('render-progress', { error: errorMessage });
+      }
     }
   });
 });

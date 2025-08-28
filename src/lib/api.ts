@@ -940,27 +940,55 @@ class ApiService {
     start: number;
     end: number;
     text: string;
-  }>, storyId: string): Promise<{
+    paragraphNumber?: number;
+    isStoryBased?: boolean;
+    totalImages?: number;
+    videoDuration?: number;
+    imageNumber?: number;
+    startTime?: number;
+    endTime?: number;
+  }>, storyId: string, totalParagraphs?: number): Promise<{
     stockMedia: Array<{
       id: string;
-      type: 'video' | 'image';
+      type: 'image'; // OpenAI only generates images
       name: string;
       description: string;
       url: string;
-      thumbnailUrl: string;
+      imageBuffer: string; // Base64 encoded image data
+      fileName: string;
+      contentType: string;
+      size: number;
       duration: number;
       width: number;
       height: number;
-      segmentId: number;
+      segmentId?: number; // Optional for strategic allocation
       startTime: number;
       endTime: number;
-      searchQuery: string;
-      pexelsId: number;
-      photographer: string;
-      source: string;
+      searchQuery?: string; // Optional for strategic allocation
+      prompt: string; // OpenAI prompt used to generate the image
+      source: string; // 'openai-dalle'
+      allocation: 'sequential' | 'strategic' | 'fallback' | 'story-based';
+      priority?: string; // For strategic allocation
+      strategicIndex?: number; // For strategic allocation
+      paragraphNumber?: number; // Which paragraph this image represents
     }>;
     totalItems: number;
     segments: number;
+    paragraphCount: number;
+    allocation: {
+      totalImages: number;
+      isLongContent: boolean;
+      imagesPerParagraph: number;
+      strategy: string;
+    };
+    strategy: string;
+    debug?: {
+      originalSegments: number;
+      searchQueriesGenerated: number;
+      imagesGenerated: number;
+      fallbackUsed: boolean;
+      contentFilteringIssues: boolean;
+    };
   }> {
     try {
       const url = `${this.baseURL}/media/fetch-stock-media`;
@@ -972,12 +1000,16 @@ class ApiService {
         headers.Authorization = `Bearer ${this.token}`;
       }
 
+      // Calculate total paragraphs if not provided
+      const paragraphCount = totalParagraphs || segments.length;
+
       const response = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify({
           segments,
           storyId,
+          totalParagraphs: paragraphCount,
         }),
       });
 

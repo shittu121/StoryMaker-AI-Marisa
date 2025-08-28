@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "./button";
 import { Card, CardContent, CardHeader, CardTitle } from "./card";
 import { Slider } from "./slider";
@@ -13,7 +13,7 @@ import {
   Play,
   Pause,
   Volume2,
-  Image as ImageIcon,
+
   Video as VideoIcon,
   Music,
   Type, 
@@ -32,6 +32,8 @@ import {
   Layers,
   Square,
   RefreshCw,
+  RotateCcw,
+  Image as ImageIcon,
 } from "lucide-react";
 
 interface MediaItem {
@@ -40,8 +42,10 @@ interface MediaItem {
   type: "voiceover" | "video" | "image" | "audio" | "text";
   duration: number;
   filePath: string;
+  fileName?: string; // File name for the media item
   // Stock media properties
   url?: string;
+  description?: string; // Description for stock media items
   pexelsId?: number;
   photographer?: string;
   source?: string;
@@ -49,6 +53,7 @@ interface MediaItem {
   text?: string;
   thumbnailUrl?: string;
   previewUrl?: string; // Blob URL for browser preview
+  paragraphNumber?: number; // Which paragraph this image represents (for OpenAI images)
   // Audio/Video properties
   volume?: number; // 0-100
   muted?: boolean; // Whether the audio/video is muted
@@ -67,6 +72,13 @@ interface MediaItem {
   fontColor?: string;
   backgroundColor?: string;
   backgroundTransparent?: boolean;
+  // Enhanced subtitle styling options
+  textOpacity?: number; // 0-100
+  backgroundOpacity?: number; // 0-100
+  textBorderColor?: string;
+  textBorderThickness?: number; // 0-10px
+  textAlignment?: "left" | "center" | "right";
+  textCapitalization?: "AA" | "Aa" | "aa" | "--";
 }
 
 interface GeometricInfo {
@@ -121,6 +133,13 @@ interface SavedMediaItem {
   fontColor?: string;
   backgroundColor?: string;
   backgroundTransparent?: boolean;
+  // Enhanced subtitle styling options
+  textOpacity?: number; // 0-100
+  backgroundOpacity?: number; // 0-100
+  textBorderColor?: string;
+  textBorderThickness?: number; // 0-10px
+  textAlignment?: "left" | "center" | "right";
+  textCapitalization?: "AA" | "Aa" | "aa" | "--";
   thumbnailUrl?: string;
   previewUrl?: string;
 }
@@ -157,24 +176,27 @@ interface SavedVideoAssets {
     savedAt: string; // timestamp when saved
   };
 
-  // Stock media info with local file paths and timestamps
+  // Stock media info with OpenAI-generated images and timestamps
   stockMediaInfo?: {
     items: Array<{
       id: string;
       name: string;
-      type: "video" | "image";
-      pexelsId?: string;
-      photographer?: string;
-      localFilePath: string; // local file path in temp folder
-      thumbnailLocalPath?: string; // local thumbnail path
-      originalUrl?: string; // original Pexels URL for reference
+      type: "image"; // OpenAI only generates images
+      description: string;
+      url: string; // OpenAI image URL
+      fileName: string;
+      duration: number;
       width: number;
       height: number;
-      duration?: number;
+      segmentId?: number; // Optional for strategic allocation
       startTime: number; // when it appears in timeline
       endTime: number; // when it ends in timeline
-      track: number; // which timeline track
-      searchQuery?: string;
+      searchQuery?: string; // Optional for strategic allocation
+      prompt: string; // OpenAI prompt used to generate the image
+      source: string; // 'openai-dalle'
+      allocation: 'sequential' | 'strategic' | 'fallback' | 'story-based';
+      priority?: string; // For strategic allocation
+      strategicIndex?: number; // For strategic allocation
       downloadedAt: string; // timestamp when downloaded
     }>;
     savedAt: string; // timestamp when saved
@@ -279,7 +301,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const animationFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
   const dragUpdateThrottleRef = useRef<number | null>(null);
-  const blobCleanupRan = useRef(false);
   const retryRenderRef = useRef<NodeJS.Timeout | null>(null);
 
   // Base64 image cache to avoid regenerating the same images
@@ -313,16 +334,36 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const currentlyPlayingVideosRef = useRef<HTMLVideoElement[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isRestoringAudio, setIsRestoringAudio] = useState(false);
+  const [isRestoringVideoAssets, setIsRestoringVideoAssets] = useState(false);
   const [audioRestored, setAudioRestored] = useState(false);
   const [transcriptRestored, setTranscriptRestored] = useState(false);
   const [autoTranscriptGenerated, setAutoTranscriptGenerated] = useState(false);
   const [isAutoGeneratingTranscripts, setIsAutoGeneratingTranscripts] = useState(false);
   const [autoTranscriptProgress, setAutoTranscriptProgress] = useState("");
   const [showCompletionMessage, setShowCompletionMessage] = useState(false);
+  
+  // Add missing state variables for tracking transcript and stock media info
+  const [transcriptInfo, setTranscriptInfo] = useState<any>(null);
+  const [stockMediaInfo, setStockMediaInfo] = useState<any>(null);
+  
   // Auto Stock Media generation state
   const [isAutoGeneratingStockMedia, setIsAutoGeneratingStockMedia] = useState(false);
   const [autoStockMediaGenerated, setAutoStockMediaGenerated] = useState(false);
   const [autoStockMediaProgress, setAutoStockMediaProgress] = useState("");
+  
+  // Cleanup effect to save transcript and stock media info when component unmounts
+  useEffect(() => {
+    return () => {
+      if (onTranscriptInfoUpdate && transcriptInfo) {
+        onTranscriptInfoUpdate(transcriptInfo);
+      }
+      
+      if (onStockMediaInfoUpdate && stockMediaInfo) {
+        onStockMediaInfoUpdate(stockMediaInfo);
+      }
+    };
+  }, [onTranscriptInfoUpdate, onStockMediaInfoUpdate, transcriptInfo, stockMediaInfo]);
+  
   const [preGeneratedProcessed, setPreGeneratedProcessed] = useState(false);
   const [lastProcessedAudioChunksLength, setLastProcessedAudioChunksLength] =
     useState(0);
@@ -401,6 +442,17 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const MAX_LAYERS = 5;
   const IMAGE_DURATION = 5;
 
+  const syncTimelineItemsFromLayers = (updatedLayers: Layer[]) => {
+    const allTimelineItems: TimelineItem[] = [];
+    updatedLayers.forEach((layer) => {
+      if (layer.items) {
+        allTimelineItems.push(...layer.items);
+      }
+    });
+    
+    setTimelineItems(allTimelineItems);
+  };
+
   // State for system fonts
   const [systemFonts, setSystemFonts] = useState<string[]>([
     "Arial",
@@ -458,6 +510,51 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       return base64Url;
     } catch (error) {
       console.error(`❌ Failed to create base64 for ${filePath}:`, error);
+      throw error;
+    }
+  };
+
+  // Helper function to convert external URL to base64 to avoid CORS issues
+  const convertUrlToBase64 = async (url: string): Promise<string> => {
+    // Check cache first
+    if (base64ImageCache.current.has(url)) {
+      return base64ImageCache.current.get(url)!;
+    }
+
+    try {
+      console.log(`🔄 Converting external URL to base64: ${url.substring(0, 50)}...`);
+      
+      // Use backend proxy to avoid CORS issues
+      const response = await fetch('http://localhost:5555/api/media/download-openai-image', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageUrl: url,
+          storyId: storyId || 'temp',
+          imageId: `temp_${Date.now()}`
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Backend proxy failed: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const base64Url = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      // Cache the result
+      base64ImageCache.current.set(url, base64Url);
+      console.log(`✅ Successfully converted URL to base64: ${base64Url.substring(0, 50)}...`);
+      return base64Url;
+    } catch (error) {
+      console.error(`❌ Failed to convert URL to base64: ${url}`, error);
       throw error;
     }
   };
@@ -874,21 +971,21 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       try {
         const video = document.createElement("video");
         
-        // Use previewUrl (blob URL) for browser preview, fallback to loading from filesystem
+        // Use filesystem path for video loading (no more blob URLs)
         let videoSrc: string;
-        if (mediaItem.previewUrl) {
-          videoSrc = mediaItem.previewUrl;
-          console.log(`🎬 Loading video ${mediaItem.id} from previewUrl (blob): ${videoSrc.substring(0, 50)}...`);
-        } else if (mediaItem.filePath) {
+        if (mediaItem.filePath) {
           console.log(`🎬 Loading video ${mediaItem.id} from filesystem: ${mediaItem.filePath}...`);
           try {
-            // Load from filesystem using mediaStorageService
+            // Load from filesystem using mediaStorageService (returns base64)
             videoSrc = await mediaStorageService.loadMediaFile(mediaItem.filePath);
-            console.log(`✅ Created blob URL for video ${mediaItem.id}: ${videoSrc.substring(0, 50)}...`);
+            console.log(`✅ Loaded video ${mediaItem.id} as base64: ${videoSrc.substring(0, 50)}...`);
           } catch (loadError) {
             console.warn(`❌ Failed to load video ${mediaItem.id} from filesystem:`, loadError);
             throw new Error(`Cannot load video from ${mediaItem.filePath}`);
           }
+        } else if (mediaItem.previewUrl) {
+          videoSrc = mediaItem.previewUrl;
+          console.log(`🎬 Loading video ${mediaItem.id} from previewUrl: ${videoSrc.substring(0, 50)}...`);
         } else {
           throw new Error(`No valid source for video ${mediaItem.id}`);
         }
@@ -980,45 +1077,164 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       }
     } else if (mediaItem.type === "image") {
       const existingImage = imageElementsRef.current.get(mediaItem.id);
-      if (existingImage) return existingImage;
-
+      if (existingImage) {
+        console.log(`✅ Image element already exists for ${mediaItem.id}`);
+        return existingImage;
+      }
+    
+      console.log(`🖼️ Starting to load image ${mediaItem.id}...`);
+      
       try {
         const img = new Image();
         
-        // Use base64 data URL for images for production compatibility
-        let imageSrc: string;
-        if (mediaItem.filePath) {
-          console.log(`🖼️ Loading image ${mediaItem.id} as base64: ${mediaItem.filePath}...`);
-          try {
-            // Use base64 data URL for images
-            imageSrc = await mediaStorageService.loadImageAsBase64(mediaItem.filePath);
-            console.log(`✅ Using base64 data URL for image ${mediaItem.id}: ${imageSrc.substring(0, 50)}...`);
-          } catch (loadError) {
-            console.warn(`❌ Failed to load image as base64 ${mediaItem.id}:`, loadError);
-            throw new Error(`Cannot load image from ${mediaItem.filePath}`);
-          }
-        } else if (mediaItem.previewUrl) {
-          imageSrc = mediaItem.previewUrl;
-          console.log(`🖼️ Loading image ${mediaItem.id} from previewUrl (fallback): ${imageSrc.substring(0, 50)}...`);
-        } else if (mediaItem.thumbnailUrl) {
+        let imageSrc: string = "";
+        
+        // Priority order for image sources:
+        // 1. thumbnailUrl (backend-served or data/blob URLs - highest priority)
+        // 2. previewUrl (backend-served or data/blob URLs)
+        // 3. filePath (filesystem path - for legacy items)
+        // 4. Fallback to any available source
+        
+        if (mediaItem.thumbnailUrl && (
+          mediaItem.thumbnailUrl.startsWith('data:') || 
+          mediaItem.thumbnailUrl.startsWith('blob:') ||
+          mediaItem.thumbnailUrl.includes('localhost:5555/api/media/openai-image')
+        )) {
+          // Use thumbnailUrl if it's a valid data URL, blob URL, or backend-served URL
           imageSrc = mediaItem.thumbnailUrl;
-          console.log(`🖼️ Loading image ${mediaItem.id} from thumbnailUrl (fallback): ${imageSrc.substring(0, 50)}...`);
+          console.log(`🖼️ Loading image ${mediaItem.id} from thumbnailUrl: ${imageSrc.substring(0, 50)}...`);
+        } else if (mediaItem.thumbnailUrl && mediaItem.thumbnailUrl.startsWith('http')) {
+          // Convert external URL to base64 to avoid CORS issues
+          try {
+            imageSrc = await convertUrlToBase64(mediaItem.thumbnailUrl);
+            console.log(`🖼️ Loaded image ${mediaItem.id} from thumbnailUrl (converted to base64): ${imageSrc.substring(0, 50)}...`);
+          } catch (error) {
+            console.warn(`❌ Failed to convert thumbnailUrl to base64 for ${mediaItem.id}:`, error);
+            // Fall back to direct URL (may cause CORS issues)
+            imageSrc = mediaItem.thumbnailUrl;
+          }
+        } else if (mediaItem.previewUrl && (
+          mediaItem.previewUrl.startsWith('data:') || 
+          mediaItem.previewUrl.startsWith('blob:') ||
+          mediaItem.previewUrl.includes('localhost:5555/api/media/openai-image')
+        )) {
+          // Use previewUrl if it's a valid data URL, blob URL, or backend-served URL
+          imageSrc = mediaItem.previewUrl;
+          console.log(`🖼️ Loading image ${mediaItem.id} from previewUrl: ${imageSrc.substring(0, 50)}...`);
+        } else if (mediaItem.previewUrl && mediaItem.previewUrl.startsWith('http')) {
+          // Convert external URL to base64 to avoid CORS issues
+          try {
+            imageSrc = await convertUrlToBase64(mediaItem.previewUrl);
+            console.log(`🖼️ Loaded image ${mediaItem.id} from previewUrl (converted to base64): ${imageSrc.substring(0, 50)}...`);
+          } catch (error) {
+            console.warn(`❌ Failed to convert previewUrl to base64 for ${mediaItem.id}:`, error);
+            // Fall back to direct URL (may cause CORS issues)
+            imageSrc = mediaItem.previewUrl;
+          }
+        } else if (mediaItem.filePath && !mediaItem.filePath.startsWith('http')) {
+          // Load from filesystem path (for legacy items)
+          console.log(`🖼️ Loading image ${mediaItem.id} from filesystem: ${mediaItem.filePath}...`);
+          
+          try {
+            imageSrc = await mediaStorageService.loadImageAsBase64(mediaItem.filePath);
+            
+            // Check if we got a file:// URL (large file) or data: URL (small file)
+            if (imageSrc.startsWith('file://')) {
+              console.log(`✅ Loaded large image ${mediaItem.id} as file path: ${imageSrc}`);
+            } else {
+              console.log(`✅ Loaded small image ${mediaItem.id} as base64: ${imageSrc.substring(0, 50)}...`);
+            }
+          } catch (loadError) {
+            console.warn(`❌ Failed to load image as base64 from filesystem ${mediaItem.id}:`, loadError);
+            
+            // Try alternative loading methods
+            try {
+              // Try loading as regular media file (might return blob URL)
+              imageSrc = await mediaStorageService.loadMediaFile(mediaItem.filePath);
+              console.log(`✅ Loaded image ${mediaItem.id} as media file: ${imageSrc.substring(0, 50)}...`);
+            } catch (altError) {
+              console.error(`❌ All filesystem loading methods failed for image ${mediaItem.id}:`, altError);
+              // Continue to next priority source
+            }
+          }
+        } else if (mediaItem.filePath && mediaItem.filePath.startsWith('http')) {
+          // Check if it's a backend-served image (no CORS issues)
+          if (mediaItem.filePath.includes('localhost:5555/api/media/openai-image')) {
+            imageSrc = mediaItem.filePath;
+            console.log(`🖼️ Loading image ${mediaItem.id} from backend-served path: ${imageSrc}`);
+          } else {
+            // Convert external URL to base64 to avoid CORS issues
+            try {
+              imageSrc = await convertUrlToBase64(mediaItem.filePath);
+              console.log(`🖼️ Loaded image ${mediaItem.id} from filePath (converted to base64): ${imageSrc.substring(0, 50)}...`);
+            } catch (error) {
+              console.warn(`❌ Failed to convert filePath to base64 for ${mediaItem.id}:`, error);
+              // Continue to next priority source
+            }
+          }
+
         } else {
-          throw new Error(`No valid source for image ${mediaItem.id}`);
+          // Last resort - try any available source
+          const availableSources = [
+            mediaItem.thumbnailUrl,
+            mediaItem.previewUrl,
+            mediaItem.filePath
+          ].filter((source): source is string => Boolean(source));
+          
+          if (availableSources.length > 0) {
+            const source = availableSources[0];
+            if (source.startsWith('http')) {
+              // Check if it's a backend-served image (no CORS issues)
+              if (source.includes('localhost:5555/api/media/openai-image')) {
+                imageSrc = source;
+                console.log(`🖼️ Using fallback backend-served source for image ${mediaItem.id}: ${imageSrc}`);
+              } else {
+                // Convert external URL to base64
+                try {
+                  imageSrc = await convertUrlToBase64(source);
+                  console.log(`🖼️ Using fallback source for image ${mediaItem.id} (converted to base64): ${imageSrc.substring(0, 50)}...`);
+                } catch (error) {
+                  console.warn(`❌ Failed to convert fallback source to base64 for ${mediaItem.id}:`, error);
+                  imageSrc = source;
+                }
+              }
+            } else {
+              imageSrc = source;
+              console.log(`🖼️ Using fallback source for image ${mediaItem.id}: ${imageSrc.substring(0, 50)}...`);
+            }
+          } else {
+            throw new Error(`No valid source for image ${mediaItem.id}`);
+          }
+        }
+        
+        // Log the image source type for debugging
+        if (imageSrc.startsWith('file://')) {
+          console.log(`🖼️ Setting image src for ${mediaItem.id} to file path: ${imageSrc}`);
+        } else if (imageSrc.startsWith('data:')) {
+          console.log(`🖼️ Setting image src for ${mediaItem.id} to base64 data: ${imageSrc.substring(0, 100)}...`);
+        } else {
+          console.log(`🖼️ Setting image src for ${mediaItem.id} to: ${imageSrc.substring(0, 100)}...`);
         }
         
         await new Promise<void>((resolve, reject) => {
           img.onload = () => {
+            console.log(`✅ Image onload fired for ${mediaItem.id} - loaded successfully`);
+            console.log(`📊 Image dimensions: ${img.width}x${img.height}`);
             resolve();
           };
-          img.onerror = () => reject(new Error("Failed to load image"));
+          img.onerror = (error) => {
+            console.error(`❌ Image onerror fired for ${mediaItem.id}:`, error);
+            console.error(`❌ Failed image src: ${imageSrc}`);
+            reject(new Error(`Failed to load image: ${error}`));
+          };
           img.src = imageSrc;
         });
-
+    
+        console.log(`🖼️ Adding image to refs for ${mediaItem.id}...`);
         imageElementsRef.current.set(mediaItem.id, img);
         console.log(`✅ Image element loaded and set for ${mediaItem.id}`);
+        console.log(`🖼️ Current image refs:`, Array.from(imageElementsRef.current.keys()));
         
-        // Trigger rendering with a small delay to ensure image is ready
         setTimeout(() => {
           if (canvasInitializedRef.current) {
             renderPreviewFrame(currentTime, 0);
@@ -1027,7 +1243,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         
         return img;
       } catch (error) {
-        console.warn(`❌ IMAGE LOAD FAIL: ${mediaItem.id} failed to load. Error:`, error);
+        console.error(`❌ IMAGE LOAD FAIL: ${mediaItem.id} failed to load. Error:`, error);
+        console.error(`🖼️ Current image refs after failure:`, Array.from(imageElementsRef.current.keys()));
         return null;
       }
     }
@@ -1058,8 +1275,15 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         return false;
       }
     } catch (error) {
-      console.warn("⚠️ Canvas health check failed: Context error", error);
-      return false;
+      // Check if this is a CORS error
+      if (error instanceof Error && (error.message.includes('tainted') || error.message.includes('cross-origin'))) {
+        console.warn("⚠️ Canvas health check failed: Canvas tainted by cross-origin data. This is expected for external images.");
+        // Don't treat CORS errors as fatal - the canvas can still work for non-external images
+        return true;
+      } else {
+        console.warn("⚠️ Canvas health check failed: Context error", error);
+        return false;
+      }
     }
     
     return true;
@@ -1189,6 +1413,14 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         console.warn(`⚠️ SKIP: Layer "${layer.name}" is not visible`);
         return;
       }
+      
+      console.log(`🔍 Layer ${layer.name} timeline items:`, layer.items.map(item => ({
+        id: item.id,
+        mediaId: item.mediaId,
+        startTime: item.startTime,
+        endTime: item.startTime + item.duration,
+        inTimeRange: time >= item.startTime && time < item.startTime + item.duration
+      })));
 
       layer.items.forEach((item, itemIndex) => {
         console.log(`🔍 Processing item ${itemIndex}: ${item.id} (${item.startTime}-${item.startTime + item.duration}) mediaId: ${item.mediaId}`);
@@ -1279,11 +1511,31 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               
               if (img.complete && img.naturalWidth > 0) {
                 try {
-              ctx.drawImage(img, 0, 0, width, height);
+                  ctx.drawImage(img, 0, 0, width, height);
                   console.log(`✅ Successfully rendered image ${mediaItem.id}`);
                   renderedItemsCount++;
                 } catch (error) {
-                  console.warn(`❌ RENDER FAIL: Error drawing image ${mediaItem.id}:`, error);
+                  // Check if this is a CORS error
+                  if (error instanceof Error && (error.message.includes('tainted') || error.message.includes('cross-origin'))) {
+                    console.warn(`⚠️ CORS ERROR: Cannot draw image ${item.mediaId} due to cross-origin restrictions. Attempting to convert to base64...`);
+                    
+                    // Try to convert the image to base64 and reload it
+                    const currentMediaItem = mediaItems.find(m => m.id === item.mediaId);
+                    if (currentMediaItem && (currentMediaItem.filePath?.startsWith('http') || currentMediaItem.previewUrl?.startsWith('http') || currentMediaItem.thumbnailUrl?.startsWith('http'))) {
+                      // Schedule a reload with base64 conversion
+                      setTimeout(() => {
+                        loadMediaElement(currentMediaItem).then(() => {
+                          if (canvasInitializedRef.current) {
+                            renderPreviewFrame(currentTime, 0);
+                          }
+                        }).catch(reloadError => {
+                          console.error(`❌ Failed to reload image ${currentMediaItem.id} with base64:`, reloadError);
+                        });
+                      }, 100);
+                    }
+                  } else {
+                    console.warn(`❌ RENDER FAIL: Error drawing image ${item.mediaId}:`, error);
+                  }
                   skippedItemsCount++;
                 }
               } else {
@@ -1292,20 +1544,46 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               }
             }
           } else if (mediaItem.type === "text") {
-            // Render text with styling
+            console.log(`📝 RENDERING TEXT: Rendering text item ${mediaItem.id}: "${mediaItem.text?.substring(0, 50)}..."`);
+            // Render text with enhanced subtitle styling
             if (mediaItem.text) {
-              // Apply font properties
+              // Apply enhanced font properties
               const fontFamily = mediaItem.fontFamily || "Arial";
-              const fontSize = Math.min(width, height) * 0.1; // Responsive font size
+              const fontSize = mediaItem.fontSize || Math.min(width, height) * 0.1;
               const fontWeight = mediaItem.fontBold ? "bold" : "normal";
               const fontStyle = mediaItem.fontItalic ? "italic" : "normal";
 
-              ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
-              ctx.fillStyle = mediaItem.fontColor || "#ffffff";
-              ctx.strokeStyle = "#000000"; // Black outline for readability
-              ctx.lineWidth = 2;
-              ctx.textAlign = "center";
+              // Build font string (underline and strikethrough handled separately)
+              let fontString = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+              ctx.font = fontString;
+              
+              // Apply text alignment
+              ctx.textAlign = mediaItem.textAlignment || "center";
               ctx.textBaseline = "middle";
+
+              // Apply text opacity
+              const textOpacity = (mediaItem.textOpacity || 100) / 100;
+              const textColor = mediaItem.fontColor || "#ffffff";
+              let textColorWithOpacity = textColor;
+              
+              if (textOpacity < 1 && textColor.startsWith('#')) {
+                const r = parseInt(textColor.slice(1, 3), 16);
+                const g = parseInt(textColor.slice(3, 5), 16);
+                const b = parseInt(textColor.slice(5, 7), 16);
+                textColorWithOpacity = `rgba(${r}, ${g}, ${b}, ${textOpacity})`;
+              }
+              
+              ctx.fillStyle = textColorWithOpacity;
+
+              // Apply text border if specified
+              if (mediaItem.textBorderThickness && mediaItem.textBorderThickness > 0 && mediaItem.textBorderColor) {
+                ctx.strokeStyle = mediaItem.textBorderColor;
+                ctx.lineWidth = mediaItem.textBorderThickness;
+              } else {
+                // Default black outline for readability
+                ctx.strokeStyle = "#000000";
+                ctx.lineWidth = 2;
+              }
 
               // Text shadow for better readability
               ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
@@ -1320,20 +1598,60 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 mediaItem.backgroundColor !== "#000000"
               ) {
                 ctx.save();
-                ctx.fillStyle = mediaItem.backgroundColor;
+                const bgColor = mediaItem.backgroundColor;
+                const bgOpacity = (mediaItem.backgroundOpacity || 100) / 100;
+                let bgColorWithOpacity = bgColor;
+                
+                if (bgOpacity < 1 && bgColor.startsWith('#')) {
+                  const r = parseInt(bgColor.slice(1, 3), 16);
+                  const g = parseInt(bgColor.slice(3, 5), 16);
+                  const b = parseInt(bgColor.slice(5, 7), 16);
+                  bgColorWithOpacity = `rgba(${r}, ${g}, ${b}, ${bgOpacity})`;
+                }
+                
+                ctx.fillStyle = bgColorWithOpacity;
                 ctx.fillRect(0, 0, width, height);
                 ctx.restore();
                 // Restore text fill style after background
-                ctx.fillStyle = mediaItem.fontColor || "#ffffff";
+                ctx.fillStyle = textColorWithOpacity;
               }
 
-              // Position text to fill the entire calculated area - no internal gaps
-              // Text should touch the edges of the rectangle
-              const textX = width / 2; // Keep horizontal centering for now
+              // Apply text capitalization
+              let displayText = mediaItem.text;
+              switch (mediaItem.textCapitalization) {
+                case "AA":
+                  displayText = mediaItem.text.toUpperCase();
+                  break;
+                case "aa":
+                  displayText = mediaItem.text.toLowerCase();
+                  break;
+                case "Aa":
+                  displayText = mediaItem.text.charAt(0).toUpperCase() + mediaItem.text.slice(1).toLowerCase();
+                  break;
+                case "--":
+                default:
+                  displayText = mediaItem.text; // Keep original
+                  break;
+              }
+
+              // Calculate text position based on alignment
+              let textX: number;
+              switch (mediaItem.textAlignment) {
+                case "left":
+                  textX = width * 0.05; // 5% from left edge
+                  break;
+                case "right":
+                  textX = width * 0.95; // 5% from right edge
+                  break;
+                case "center":
+                default:
+                  textX = width / 2; // Center
+                  break;
+              }
 
               // Word wrap to fill the exact calculated width
-              const words = mediaItem.text.split(" ");
-              const maxWidth = width * 0.99; // Use 99% to prevent edge overflow while filling the area
+              const maxWidth = width * 0.9; // Use 90% to prevent edge overflow
+              const words = displayText.split(" ");
               const lines: string[] = [];
               let currentLine = words[0] || "";
 
@@ -1353,90 +1671,128 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 lines.push(currentLine);
               }
 
-              // Position text to fill the entire area - eliminate all internal gaps
+              // Position text to fill the entire area
               let actualLineHeight;
               let startY;
 
-              // Use middle baseline for proper centering with equal top/bottom gaps
-              ctx.textBaseline = "middle";
-
               if (lines.length === 1) {
-                // Single line - center vertically with equal top/bottom margins
                 actualLineHeight = height;
-                startY = height / 2; // Perfect vertical center
+                startY = height / 2;
               } else {
-                // Multiple lines - distribute evenly with equal top/bottom margins
                 const totalAvailableHeight = height;
                 actualLineHeight = totalAvailableHeight / lines.length;
-                const topMargin = actualLineHeight / 2; // Equal margin from top
-                startY = topMargin; // Start with equal top margin
+                const topMargin = actualLineHeight / 2;
+                startY = topMargin;
               }
 
               lines.forEach((line, index) => {
                 const lineY = startY + index * actualLineHeight;
 
-                // Calculate optimal font size to fit within bounds without overflow
+                // Calculate optimal font size to fit within bounds
                 let optimalFontSize = fontSize;
 
                 if (lines.length === 1) {
-                  // Single line - ensure text fits both width and height constraints
                   const lineMetrics = ctx.measureText(line);
-
-                  // Calculate maximum font size based on width constraint
-                  const maxWidthFontSize =
-                    width * 0.9 * (fontSize / lineMetrics.width);
-
-                  // Calculate maximum font size based on height constraint (accounting for ascent/descent)
-                  const maxHeightFontSize = height * 0.8; // 80% to ensure proper top/bottom margins
-
-                  // Use the smaller of the two to ensure no overflow
-                  optimalFontSize = Math.min(
-                    maxWidthFontSize,
-                    maxHeightFontSize,
-                    fontSize * 2
-                  ); // Max 2x scaling
+                  const maxWidthFontSize = width * 0.9 * (fontSize / lineMetrics.width);
+                  const maxHeightFontSize = height * 0.8;
+                  optimalFontSize = Math.min(maxWidthFontSize, maxHeightFontSize, fontSize * 2);
                 } else {
-                  // Multi-line - ensure each line fits within its allocated space
-                  const maxLineWidth = Math.max(
-                    ...lines.map((l) => ctx.measureText(l).width)
-                  );
-
-                  // Calculate font size based on width constraint
-                  const maxWidthFontSize =
-                    width * 0.9 * (fontSize / maxLineWidth);
-
-                  // Calculate font size based on height constraint
-                  const maxHeightFontSize = actualLineHeight * 0.7; // 70% to ensure proper spacing
-
-                  optimalFontSize = Math.min(
-                    maxWidthFontSize,
-                    maxHeightFontSize,
-                    fontSize * 1.5
-                  ); // Max 1.5x scaling
+                  const maxLineWidth = Math.max(...lines.map((l) => ctx.measureText(l).width));
+                  const maxWidthFontSize = width * 0.9 * (fontSize / maxLineWidth);
+                  const maxHeightFontSize = actualLineHeight * 0.7;
+                  optimalFontSize = Math.min(maxWidthFontSize, maxHeightFontSize, fontSize * 1.5);
                 }
 
                 // Apply the calculated font size if different from original
                 if (Math.abs(optimalFontSize - fontSize) > 1) {
-                  // Only change if significant difference
-                  ctx.font = `${mediaItem.fontItalic ? "italic" : "normal"} ${
-                    mediaItem.fontBold ? "bold" : "normal"
-                  } ${optimalFontSize}px ${fontFamily}`;
+                  let newFontString = `${fontStyle} ${fontWeight} ${optimalFontSize}px ${fontFamily}`;
+                  ctx.font = newFontString;
                 }
 
-                // Capture current font and text measurements before any changes
-                // Draw text stroke (outline)
-                ctx.strokeText(line, textX, lineY);
-                // Draw text fill
+                // Draw text with border and fill
+                if (mediaItem.textBorderThickness && mediaItem.textBorderThickness > 0) {
+                  ctx.strokeText(line, textX, lineY);
+                }
                 ctx.fillText(line, textX, lineY);
 
-                ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+                // Draw underline if enabled
+                if (mediaItem.fontUnderline) {
+                  const lineMetrics = ctx.measureText(line);
+                  const underlineY = lineY + (optimalFontSize || fontSize) * 0.1;
+                  const underlineThickness = Math.max(1, (optimalFontSize || fontSize) * 0.05);
+                  
+                  ctx.save();
+                  ctx.strokeStyle = ctx.fillStyle; // Use same color as text
+                  ctx.lineWidth = underlineThickness;
+                  ctx.beginPath();
+                  
+                  let underlineStartX = textX;
+                  let underlineWidth = lineMetrics.width;
+                  
+                  // Adjust start position based on text alignment
+                  switch (mediaItem.textAlignment) {
+                    case "left":
+                      underlineStartX = textX;
+                      break;
+                    case "center":
+                      underlineStartX = textX - lineMetrics.width / 2;
+                      break;
+                    case "right":
+                      underlineStartX = textX - lineMetrics.width;
+                      break;
+                  }
+                  
+                  ctx.moveTo(underlineStartX, underlineY);
+                  ctx.lineTo(underlineStartX + underlineWidth, underlineY);
+                  ctx.stroke();
+                  ctx.restore();
+                }
+
+                // Draw strikethrough if enabled
+                if (mediaItem.fontStrikethrough) {
+                  const lineMetrics = ctx.measureText(line);
+                  const strikethroughY = lineY - (optimalFontSize || fontSize) * 0.2;
+                  const strikethroughThickness = Math.max(1, (optimalFontSize || fontSize) * 0.05);
+                  
+                  ctx.save();
+                  ctx.strokeStyle = ctx.fillStyle; // Use same color as text
+                  ctx.lineWidth = strikethroughThickness;
+                  ctx.beginPath();
+                  
+                  let strikethroughStartX = textX;
+                  let strikethroughWidth = lineMetrics.width;
+                  
+                  // Adjust start position based on text alignment
+                  switch (mediaItem.textAlignment) {
+                    case "left":
+                      strikethroughStartX = textX;
+                      break;
+                    case "center":
+                      strikethroughStartX = textX - lineMetrics.width / 2;
+                      break;
+                    case "right":
+                      strikethroughStartX = textX - lineMetrics.width;
+                      break;
+                  }
+                  
+                  ctx.moveTo(strikethroughStartX, strikethroughY);
+                  ctx.lineTo(strikethroughStartX + strikethroughWidth, strikethroughY);
+                  ctx.stroke();
+                  ctx.restore();
+                }
+
+                // Restore original font
+                ctx.font = fontString;
               });
 
-              // Reset shadow (baseline already correct)
+              // Reset shadow
               ctx.shadowColor = "transparent";
               ctx.shadowBlur = 0;
               ctx.shadowOffsetX = 0;
               ctx.shadowOffsetY = 0;
+              
+              console.log(`✅ Successfully rendered text ${mediaItem.id}`);
+              renderedItemsCount++;
             }
           }
 
@@ -1554,9 +1910,9 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
 
   // Update seekToTime to handle media seeking
-  const seekToTime = async (newTime: number) => {
+  // Temporarily commented out - not currently in use
+  /* const seekToTime = async (newTime: number) => {
     const wasPlaying = isPlaying;
-    const previousTime = currentTime;
     
     if (isPlaying) {
       pauseTimeline();
@@ -1685,7 +2041,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     if (wasPlaying) {
       playTimeline();
     }
-  };
+  }; */
 
 
 
@@ -1828,7 +2184,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
 
   // Clean up audio elements and ensure smooth transitions
-  const cleanupAudioElements = () => {
+  // Temporarily commented out - not currently in use
+  /* const cleanupAudioElements = () => {
     // Stop all currently playing audio elements
     currentlyPlayingAudios.forEach((audio) => {
       if (audio && !audio.paused) {
@@ -1847,7 +2204,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         audio.currentTime = 0;
       }
     });
-  };
+  }; */
 
 
 
@@ -2332,19 +2689,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       imageElementsRef.current.clear();
       // Don't immediately set canvas as uninitialized - let the re-initialization handle it
       // canvasInitializedRef.current = false; // REMOVED: Too aggressive cleanup
-
-      // Cleanup blob URLs to prevent memory leaks
-      mediaItems.forEach((item) => {
-        if (item.thumbnailUrl && item.thumbnailUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(item.thumbnailUrl);
-        }
-        if (item.previewUrl && item.previewUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(item.previewUrl);
-        }
-        if (item.filePath && item.filePath.startsWith("blob:")) {
-          URL.revokeObjectURL(item.filePath);
-        }
-      });
     };
   }, []);
 
@@ -2391,6 +2735,14 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           backgroundTransparent: item.backgroundTransparent,
           fontBold: item.fontBold,
           fontItalic: item.fontItalic,
+          fontUnderline: item.fontUnderline,
+          fontStrikethrough: item.fontStrikethrough,
+          textOpacity: item.textOpacity,
+          backgroundOpacity: item.backgroundOpacity,
+          textBorderColor: item.textBorderColor,
+          textBorderThickness: item.textBorderThickness,
+          textAlignment: item.textAlignment,
+          textCapitalization: item.textCapitalization,
           text: item.text,
         }))
     ),
@@ -2420,9 +2772,31 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       });
     }
 
+    // Load thumbnails for images that don't have them yet
+    const imagesWithoutThumbnails = mediaItems.filter(
+      (item) =>
+        item.type === "image" && !item.thumbnailUrl && item.filePath
+    );
+
+    if (imagesWithoutThumbnails.length > 0) {
+      console.log(`🖼️ Loading thumbnails for ${imagesWithoutThumbnails.length} images...`);
+      imagesWithoutThumbnails.forEach(item => {
+        loadImageAsBase64(item.filePath).then(base64Url => {
+          setMediaItems(prev => prev.map(mediaItem => 
+            mediaItem.id === item.id 
+              ? { ...mediaItem, thumbnailUrl: base64Url }
+              : mediaItem
+          ));
+        }).catch(error => {
+          console.error(`❌ Failed to load thumbnail for ${item.name}:`, error);
+        });
+      });
+    }
+
     console.log(`🔍 MEDIA LOADING: Processing ${mediaItems.length} media items for element loading`);
     
-    mediaItems.forEach((item, index) => {
+    // Load all media elements in parallel for better performance
+    const loadPromises = mediaItems.map(async (item, index) => {
       const hasVideoRef = videoElementsRef.current.has(item.id);
       const hasImageRef = imageElementsRef.current.has(item.id);
       
@@ -2430,52 +2804,53 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       
       if (!hasVideoRef && !hasImageRef) {
         console.log(`⚡ Loading element for ${item.id}...`);
-        // Fix invalid blob URLs from restored state
-        const fixedItem = fixRestoredMediaItem(item);
-        loadMediaElement(fixedItem);
+        try {
+          await loadMediaElement(item);
+          console.log(`✅ Successfully loaded element for ${item.id}`);
+        } catch (error) {
+          console.error(`❌ Failed to load element for ${item.id}:`, error);
+        }
       } else {
         console.log(`✅ Element already loaded for ${item.id}`);
       }
     });
     
-    console.log(`📊 REFS STATUS: ${videoElementsRef.current.size} video refs, ${imageElementsRef.current.size} image refs`);
-  }, [mediaItems]);
-  
-  // Function to fix restored media items with invalid blob URLs
-  const fixRestoredMediaItem = (item: MediaItem): MediaItem => {
-    // If previewUrl is a blob URL that might be invalid, clear it so loadMediaElement uses filePath
-    if (item.previewUrl && item.previewUrl.startsWith('blob:')) {
-      console.warn(`🔧 BLOB URL FIX: Clearing invalid blob URL for ${item.id}: ${item.previewUrl.substring(0, 30)}... 
-      → Will use filePath: ${item.filePath?.substring(0, 50)}...`);
-      return {
-        ...item,
-        previewUrl: undefined, // Clear invalid blob URL
-      };
-    }
-    return item;
-  };
-  
-  // Cleanup invalid blob URLs when media items are first loaded (from restored state)
-  useEffect(() => {
-    if (mediaItems.length > 0 && !blobCleanupRan.current) {
-      const hasInvalidBlobUrls = mediaItems.some(item => 
-        item.previewUrl && item.previewUrl.startsWith('blob:')
-      );
+    // Wait for all media elements to load
+    Promise.all(loadPromises).then(() => {
+      console.log(`📊 REFS STATUS: ${videoElementsRef.current.size} video refs, ${imageElementsRef.current.size} image refs`);
       
-      if (hasInvalidBlobUrls) {
-        const fixedMediaItems = mediaItems.map(fixRestoredMediaItem);
-        setMediaItems(fixedMediaItems);
-        blobCleanupRan.current = true; // Prevent running again
+      // Trigger a re-render after all media is loaded
+      if (canvasInitializedRef.current) {
+        renderPreviewFrame(currentTime, 0);
+      }
+    });
+  }, [mediaItems]);
+
+
+  
+  // Cleanup orphaned timeline items that reference non-existent media items
+  useEffect(() => {
+    if (mediaItems.length > 0 && timelineItems.length > 0) {
+      const mediaItemIds = new Set(mediaItems.map(item => item.id));
+      const orphanedTimelineItems = timelineItems.filter(item => !mediaItemIds.has(item.mediaId));
+      
+      if (orphanedTimelineItems.length > 0) {
+        console.warn(`🧹 Found ${orphanedTimelineItems.length} orphaned timeline items, cleaning up...`);
+        orphanedTimelineItems.forEach(item => {
+          console.warn(`🗑️ Removing orphaned timeline item: ${item.id} (references non-existent media: ${item.mediaId})`);
+        });
         
-        // Force a re-render after cleaning up URLs
-        setTimeout(() => {
-          if (canvasInitializedRef.current) {
-            renderPreviewFrame(currentTime);
-          }
-        }, 100);
+        // Remove orphaned timeline items
+        setTimelineItems(prev => prev.filter(item => mediaItemIds.has(item.mediaId)));
+        
+        // Also clean up layers
+        setLayers(prev => prev.map(layer => ({
+          ...layer,
+          items: layer.items.filter(item => mediaItemIds.has(item.mediaId))
+        })));
       }
     }
-  }, [mediaItems.length]); // Run when mediaItems first populate
+  }, [mediaItems, timelineItems]);
 
   // Cleanup retry timer and loading attempts on unmount to prevent memory leaks
   useEffect(() => {
@@ -2516,7 +2891,18 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const handleAddMediaClick = () => fileInputRef.current?.click();
 
   const [showTranscriptSelector, setShowTranscriptSelector] = useState(false);
-  const [showStockMediaTranscriptSelector, setShowStockMediaTranscriptSelector] = useState(false);
+
+  const [showStockMediaConfirmation, setShowStockMediaConfirmation] = useState(false);
+  const [pendingStockMediaRequest, setPendingStockMediaRequest] = useState<Array<{
+    id: number;
+    start: number;
+    end: number;
+    text: string;
+    paragraphNumber?: number;
+    isStoryBased?: boolean;
+    totalImages?: number;
+    videoDuration?: number;
+  }> | null>(null);
 
   const handleAddTranscriptClick = () => setShowTranscriptSelector(true);
 
@@ -2541,6 +2927,29 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         )
       );
     }
+  };
+
+  // Function to restore text properties to default values
+  const restoreTextDefaults = (mediaId: string) => {
+    const defaultTextProperties = {
+      fontFamily: "Arial",
+      fontSize: 24,
+      fontBold: false,
+      fontItalic: false,
+      fontUnderline: false,
+      fontStrikethrough: false,
+      fontColor: "#ffffff",
+      backgroundColor: "#000000",
+      backgroundTransparent: false,
+      textOpacity: 100,
+      backgroundOpacity: 70,
+      textBorderColor: "#000000",
+      textBorderThickness: 2,
+      textAlignment: "center" as const,
+      textCapitalization: "--" as const,
+    };
+
+    updateMediaItemProperties(mediaId, defaultTextProperties);
   };
 
   // Function to update media item properties
@@ -2610,6 +3019,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     }
     
     // Save video assets to ensure property changes are persisted
+    // But don't trigger transcript generation for text property updates
     saveVideoAssets();
   };
 
@@ -2879,7 +3289,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       end: number;
       text: string;
     }>;
-  }, audioStartTime: number = 0) => {
+  }, audioStartTime: number = 0, voiceoverItemId?: string) => {
     // Get current canvas dimensions for optimal text sizing
     const canvas = previewCanvasRef.current;
     const canvasWidth = canvas?.width || 1920;
@@ -2904,7 +3314,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       console.log(`📝 SEGMENT DURATION: "${segment.text.substring(0, 30)}..." - Original: ${segment.end - segment.start}s, Proportional: ${proportionalDuration.toFixed(2)}s`);
       
       return {
-        id: `text_segment_${segment.id}_${Date.now()}`,
+        id: `text_segment_${voiceoverItemId || 'unknown'}_${segment.id}`,
         name: `Text: ${segment.text.substring(0, 30)}${
           segment.text.length > 30 ? "..." : ""
         }`,
@@ -2917,25 +3327,26 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         fontSize: Math.min(canvasWidth, canvasHeight) * 0.04, // 4% of canvas size
         fontBold: false,
         fontItalic: false,
+        fontUnderline: false,
+        fontStrikethrough: false,
         fontColor: "#ffffff",
         backgroundColor: "rgba(0, 0, 0, 0.7)", // Semi-transparent background for readability
         backgroundTransparent: false, // Default to opaque background
+        // Enhanced subtitle styling defaults
+        textOpacity: 100,
+        backgroundOpacity: 70,
+        textBorderColor: "#000000",
+        textBorderThickness: 2,
+        textAlignment: "center",
+        textCapitalization: "--",
       };
     });
 
-    // 📝 PREVENT DUPLICATES: Add text media items only if they don't already exist
+    // 📝 PREVENT DUPLICATES: Check for existing text items by content and segment ID
     setMediaItems((prev) => {
-      const existingTextIds = prev.filter(item => item.type === "text").map(item => item.id);
-      const newTextItems = textMediaItems.filter(textItem => 
-        !existingTextIds.includes(textItem.id)
-      );
-      if (newTextItems.length > 0) {
-        console.log(`📝 CREATE TRANSCRIPT: Adding ${newTextItems.length} new text media items from transcript`);
-        return [...prev, ...newTextItems];
-      } else {
-        console.log(`📝 CREATE TRANSCRIPT: All text items already exist, skipping duplicates`);
-        return prev;
-      }
+      // Add all text items - let the system handle duplicates naturally
+      console.log(`📝 CREATE TRANSCRIPT: Adding ${textMediaItems.length} new text media items from transcript`);
+      return [...prev, ...textMediaItems];
     });
 
     // Create TimelineItems for each text segment with optimized geometry
@@ -2961,9 +3372,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         );
 
         // Calculate proportional start time based on audio chunk's actual duration
-        const segmentRatio = segment.start / Math.max(...transcript.segments.map(s => s.end));
-        const proportionalStartTime = audioStartTime + (audioDuration * segmentRatio);
-        const proportionalEndTime = proportionalStartTime + mediaItem.duration;
+        // segment.start and segment.end are relative to the audio file duration
+        const segmentStartRatio = segment.start / Math.max(...transcript.segments.map(s => s.end));
+        const segmentEndRatio = segment.end / Math.max(...transcript.segments.map(s => s.end));
+        const proportionalStartTime = audioStartTime + (audioDuration * segmentStartRatio);
+        const proportionalEndTime = audioStartTime + (audioDuration * segmentEndRatio);
+        const proportionalDuration = proportionalEndTime - proportionalStartTime;
 
         console.log(`📝 TRANSCRIPT SEGMENT: "${segment.text.substring(0, 30)}..." - Original: ${segment.start}s-${segment.end}s, Timeline: ${proportionalStartTime.toFixed(2)}s-${proportionalEndTime.toFixed(2)}s, Duration: ${mediaItem.duration.toFixed(2)}s`);
 
@@ -2971,39 +3385,30 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           id: `timeline_${mediaItem.id}`,
           mediaId: mediaItem.id,
           startTime: proportionalStartTime, // Offset by audio file's start time
-          duration: mediaItem.duration, // Use the proportional duration from mediaItem
+          duration: proportionalDuration, // Use the calculated proportional duration
           track: 0, // Will be updated when layer is created
           geometry: geometry, // Apply optimized geometry
         };
       }
     );
 
-    // 📝 PREVENT DUPLICATES: Add timeline items to the Text layer (check for existing items)
+    // Add timeline items to the Text layer
     setLayers((prevLayers) => {
       const existingTextLayerIndex = prevLayers.findIndex(
         (layer) => layer.type === "text"
       );
 
       if (existingTextLayerIndex !== -1) {
-        // Add to existing text layer (check for duplicates)
+        // Add to existing text layer
         const updatedLayers = [...prevLayers];
-        const existingItemIds = updatedLayers[existingTextLayerIndex].items.map(item => item.id);
-        const newTimelineItems = textTimelineItems.filter(item => 
-          !existingItemIds.includes(item.id)
-        );
-        
-        if (newTimelineItems.length > 0) {
-          console.log(`📝 CREATE TRANSCRIPT: Adding ${newTimelineItems.length} new timeline items to existing text layer`);
+        console.log(`📝 CREATE TRANSCRIPT: Adding ${textTimelineItems.length} new timeline items to existing text layer`);
         updatedLayers[existingTextLayerIndex] = {
           ...updatedLayers[existingTextLayerIndex],
           items: [
             ...updatedLayers[existingTextLayerIndex].items,
-              ...newTimelineItems,
+            ...textTimelineItems,
           ],
         };
-        } else {
-          console.log(`📝 CREATE TRANSCRIPT: All timeline items already exist in text layer, skipping duplicates`);
-        }
         return updatedLayers;
       } else {
         // Create new text layer
@@ -3045,15 +3450,19 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     const sentenceTranscriptData = {
       sentences: transcript.segments.map((segment, index) => {
         const mediaItem = textMediaItems[index];
-        const segmentRatio = segment.start / Math.max(...transcript.segments.map(s => s.end));
-        const proportionalStartTime = audioStartTime + (audioDuration * segmentRatio);
+        // Use the same timing calculation as the timeline items
+        const segmentStartRatio = segment.start / Math.max(...transcript.segments.map(s => s.end));
+        const segmentEndRatio = segment.end / Math.max(...transcript.segments.map(s => s.end));
+        const proportionalStartTime = audioStartTime + (audioDuration * segmentStartRatio);
+        const proportionalEndTime = audioStartTime + (audioDuration * segmentEndRatio);
+        const proportionalDuration = proportionalEndTime - proportionalStartTime;
         
         return {
           id: mediaItem.id, // Use the same ID as the timeline item
           text: segment.text,
           startTime: proportionalStartTime, // Use proportional start time
-          duration: mediaItem.duration, // Use proportional duration
-          endTime: proportionalStartTime + mediaItem.duration, // Use proportional end time
+          duration: proportionalDuration, // Use calculated proportional duration
+          endTime: proportionalEndTime, // Use calculated proportional end time
           audioChunkId: undefined, // Could be linked to specific audio chunks if needed
           chapterNumber: undefined, // Could be linked to chapters if needed
         };
@@ -3068,48 +3477,162 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       onSentenceTranscriptsUpdate(sentenceTranscriptData);
     }
 
-    // Trigger auto-save of video assets
-    setTimeout(() => {
-      saveVideoAssets();
-    }, 100);
+    // Update transcriptInfo state for saving to database
+    const newTranscriptInfo = {
+      storyContent: storyContent || "",
+      audioChunks: audioChunks || [],
+      totalAudioDuration: audioChunks?.reduce((total, chunk) => total + (chunk.duration || 0), 0) || 0,
+      voiceoverSettings: {
+        selectedVoiceId: selectedVoiceId || "",
+        volume: voiceoverVolume,
+      },
+      savedAt: new Date().toISOString(),
+    };
+    setTranscriptInfo(newTranscriptInfo);
+
+    // Note: Auto-save is handled elsewhere in the component
   };
 
-  // Automatically generate stock media for all transcript segments across all voiceover clips
-  const autoGenerateStockMediaFromTranscripts = async () => {
-    if (!storyId) return;
-    if (isAutoGeneratingStockMedia || autoStockMediaGenerated) return;
 
-    // Gather transcript segments from existing text layers
-    const textLayers = layers.filter((layer) => layer.type === "text");
-    const segments: Array<{ id: number; start: number; end: number; text: string }>= [];
 
-    for (const layer of textLayers) {
-      for (const item of layer.items) {
-        const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
-        if (mediaItem?.type === "text" && mediaItem.text) {
-          segments.push({
-            id: Number(String(item.id).replace(/\D/g, "")) || segments.length + 1,
-            start: item.startTime,
-            end: item.startTime + item.duration,
-            text: mediaItem.text,
+  // Function to import OpenAI-generated images from local filesystem
+  const importOpenAIGeneratedImages = async (
+    stockMediaItems: Array<{
+      id: string;
+      type: "image";
+      name: string;
+      description: string;
+      url: string;
+      imageBuffer: string; // Base64 encoded image data
+      fileName: string;
+      contentType: string;
+      size: number;
+      duration: number;
+      width: number;
+      height: number;
+      segmentId?: number;
+      startTime: number;
+      endTime: number;
+      searchQuery?: string;
+      prompt: string;
+      source: string;
+      allocation: 'sequential' | 'strategic' | 'fallback' | 'story-based';
+      priority?: string;
+      strategicIndex?: number;
+      paragraphNumber?: number; // Which paragraph this image represents
+    }>
+  ): Promise<MediaItem[]> => {
+    if (!storyId) {
+      console.error("Story ID is required to import OpenAI-generated images");
+      return [];
+    }
+
+    const importedMediaItems: MediaItem[] = [];
+
+    for (const stockItem of stockMediaItems) {
+      try {
+        console.log(`🔄 Importing OpenAI image: ${stockItem.name}`);
+        console.log(`🔍 DEBUG: stockItem object:`, {
+          id: stockItem.id,
+          name: stockItem.name,
+          url: stockItem.url,
+          imageBuffer: stockItem.imageBuffer ? `${stockItem.imageBuffer.substring(0, 50)}...` : 'none',
+          fileName: stockItem.fileName,
+          contentType: stockItem.contentType,
+          size: stockItem.size,
+          source: stockItem.source,
+          type: stockItem.type,
+          hasUrl: !!stockItem.url,
+          hasImageBuffer: !!stockItem.imageBuffer,
+          hasFileName: !!stockItem.fileName,
+          urlLength: stockItem.url?.length || 0,
+          bufferSize: stockItem.imageBuffer?.length || 0
+        });
+
+        // Generate unique media ID for imported item
+        const mediaId = `openai-${Date.now()}-${Math.random()
+          .toString(36)
+          .substr(2, 9)}`;
+
+        // Check if we have image buffer data
+        if (stockItem.imageBuffer) {
+          console.log(`✅ USING IMAGE BUFFER: Image ${stockItem.id} has base64 data`);
+          console.log(`📄 File name: ${stockItem.fileName}`);
+          console.log(`🆔 Story ID: ${storyId}`);
+          
+          // Convert base64 to blob
+          const base64Data = stockItem.imageBuffer;
+          const byteCharacters = atob(base64Data);
+          const byteNumbers = new Array(byteCharacters.length);
+          for (let i = 0; i < byteCharacters.length; i++) {
+            byteNumbers[i] = byteCharacters.charCodeAt(i);
+          }
+          const byteArray = new Uint8Array(byteNumbers);
+          const blob = new Blob([byteArray], { type: stockItem.contentType });
+          
+          // Use the same approach as the + button - save to Electron AppData
+          const savedFile = await mediaStorageService.saveMediaFile(
+            storyId,
+            mediaId,
+            blob,
+            "image",
+            stockItem.url, // originalUrl
+            "openai", // pexelsId
+            "OpenAI" // photographer
+          );
+          
+          // Create a MediaItem that uses the Electron AppData path (same as + button)
+          const importedMedia: MediaItem = {
+            id: mediaId,
+            name: stockItem.name,
+            type: "image",
+            duration: stockItem.duration,
+            filePath: savedFile.relativePath, // Use Electron AppData path
+            fileName: savedFile.fileName, // Add the fileName property
+            url: stockItem.url, // Keep original URL for reference
+            description: stockItem.description,
+            source: stockItem.source,
+            paragraphNumber: stockItem.paragraphNumber,
+            x: 0,
+            y: 0,
+            width: stockItem.width,
+            height: stockItem.height,
+            // Generate thumbnail immediately from the base64 data
+            thumbnailUrl: `data:${stockItem.contentType};base64,${stockItem.imageBuffer}`,
+          };
+
+          // Add OpenAI-specific properties
+          (importedMedia as any).openaiPrompt = stockItem.prompt;
+          (importedMedia as any).allocation = stockItem.allocation;
+          (importedMedia as any).priority = stockItem.priority;
+          (importedMedia as any).strategicIndex = stockItem.strategicIndex;
+          (importedMedia as any).originalOpenAIUrl = stockItem.url;
+          (importedMedia as any).segmentId = stockItem.segmentId;
+
+          console.log(`✅ OpenAI image saved to Electron AppData: ${importedMedia.filePath}`);
+          console.log(`📁 Electron path: ${importedMedia.filePath}`);
+          console.log(`🔗 Original URL: ${stockItem.url}`);
+          console.log(`📄 File name: ${importedMedia.fileName}`);
+
+          importedMediaItems.push(importedMedia);
+          console.log(`✅ Successfully imported OpenAI image: ${stockItem.name}`, {
+            id: importedMedia.id,
+            source: importedMedia.source,
+            filePath: importedMedia.filePath,
+            fileName: importedMedia.fileName,
+            type: importedMedia.type
           });
+        } else {
+          console.warn(`⚠️ WARNING: No image buffer data for image ${stockItem.id}, skipping...`);
+          continue; // Skip images without buffer data
         }
+
+      } catch (error) {
+        console.error(`❌ Failed to import OpenAI image ${stockItem.id}:`, error);
       }
     }
 
-    if (segments.length === 0) return;
-
-    try {
-      setIsAutoGeneratingStockMedia(true);
-      setAutoStockMediaProgress(`Generating stock media for ${segments.length} transcript segments...`);
-      await handleStockMediaTranscriptSelect(segments);
-      setAutoStockMediaGenerated(true);
-      setAutoStockMediaProgress("Stock media generation completed!");
-    } catch (error) {
-      console.warn("⚠️ AUTO-STOCK: Failed to generate stock media:", error);
-    } finally {
-      setIsAutoGeneratingStockMedia(false);
-    }
+    return importedMediaItems;
   };
 
   // Function to create stocks layer from Pexels media
@@ -3129,7 +3652,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       : null;
 
     if (!type) {
-      console.warn(`❌ Unsupported file type: ${fileType} for ${fileName}`);
       return null;
     }
 
@@ -3195,24 +3717,15 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             }
           };
 
-          audio.onerror = (error) => {
-            console.error(`❌ Audio loading error:`, {
-              fileName: fileName,
-              error: error,
-              src: tempBlobUrl.substring(0, 50) + "...",
-            });
+          audio.onerror = () => {
             resolveOnce();
           };
 
           // Start loading
           audio.load();
 
-          // Timeout fallback
           setTimeout(() => {
             if (!resolved) {
-              console.warn(
-                `⏰ Audio loading timeout for ${fileName}, duration: ${duration}`
-              );
               resolveOnce();
             }
           }, 3000);
@@ -3226,15 +3739,38 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
       if (storyId) {
         try {
+          // Determine if this is an OpenAI image based on the mediaId prefix
+          const isOpenAIImage = mediaId.startsWith('openai-');
+          const pexelsId = isOpenAIImage ? "openai" : "local";
+          const photographer = isOpenAIImage ? "OpenAI" : "User";
+          
+          console.log(`💾 SAVING: Saving ${type} file to filesystem...`, {
+            storyId,
+            mediaId,
+            fileName,
+            fileType,
+            isOpenAIImage,
+            pexelsId,
+            photographer,
+            fileSize: file.size
+          });
+          
           const savedFile = await mediaStorageService.saveMediaFile(
             storyId,
             mediaId,
             file,
             type === "video" ? "video" : "image",
             tempBlobUrl, // originalUrl
-            "local", // pexelsId (using 'local' for manually uploaded files)
-            "User" // photographer (using 'User' for manually uploaded files)
+            pexelsId, // Use "openai" for OpenAI images, "local" for manual uploads
+            photographer // Use "OpenAI" for OpenAI images, "User" for manual uploads
           );
+          
+          console.log(`✅ SAVED: File saved to filesystem successfully:`, {
+            relativePath: savedFile.relativePath,
+            filePath: savedFile.filePath,
+            fileName: savedFile.fileName
+          });
+          
           filePath = savedFile.relativePath;
 
           // Always keep the blob URL for preview regardless of type
@@ -3244,9 +3780,11 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           // For videos, we already have the generated canvas thumbnail
           if (type === "image") {
             try {
+              console.log(`🔄 LOADING: Loading saved image as base64 for thumbnail: ${filePath}`);
               thumbnailForDisplay = await mediaStorageService.loadImageAsBase64(filePath); // Use base64 for production compatibility
+              console.log(`✅ LOADED: Image loaded as base64 successfully, length: ${thumbnailForDisplay.length}`);
             } catch (base64Error) {
-              console.warn(`Failed to load image as base64 for thumbnail, using blob URL:`, base64Error);
+              console.warn(`⚠️ Failed to load image as base64 for thumbnail, using blob URL:`, base64Error);
               thumbnailForDisplay = tempBlobUrl; // Fallback to blob URL
             }
           } else {
@@ -3255,10 +3793,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             thumbnailForDisplay = thumbnailUrl; // Use the generated canvas thumbnail
           }
         } catch (saveError) {
-          console.warn(
-            `Failed to save media file to filesystem, using blob URL:`,
-            saveError
-          );
+          console.error(`❌ SAVE FAILED: Failed to save media file to filesystem:`, saveError);
+          console.error(`❌ SAVE ERROR DETAILS:`, {
+            storyId,
+            mediaId,
+            fileName,
+            fileType,
+            fileSize: file.size,
+            error: saveError instanceof Error ? saveError.message : 'Unknown error',
+            stack: saveError instanceof Error ? saveError.stack : undefined
+          });
           // Continue with blob URL as fallback
           previewUrl = tempBlobUrl;
           thumbnailForDisplay = tempBlobUrl;
@@ -3288,152 +3832,29 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
 
   // Import saved stock media files using the same flow as handleFileSelect
-  const importSavedStockMedia = async (
-    stockMediaItems: Array<{
-      id: string;
-      type: "video" | "image";
-      name: string;
-      description: string;
-      url: string;
-      fileData?: {
-        fileName: string;
-        fileBuffer: number[];
-        fileType: string;
-      };
-      thumbnailData?: {
-        fileName: string;
-        fileBuffer: number[];
-        fileType: string;
-      };
-      thumbnailUrl: string;
-      duration: number;
-      width: number;
-      height: number;
-      segmentId: number;
-      startTime: number;
-      endTime: number;
-      searchQuery: string;
-      pexelsId: number;
-      photographer: string;
-      source: string;
-    }>
+  // This function is no longer needed - replaced by importOpenAIGeneratedImages
+  // Temporarily commented out - deprecated function
+  /* const importSavedStockMedia = async (
+    stockMediaItems: Array<any>
   ): Promise<MediaItem[]> => {
-    if (!storyId) {
-      console.error("Story ID is required to import saved stock media");
-      return [];
-    }
-
-    const importedMediaItems: MediaItem[] = [];
-
-
-    for (const stockItem of stockMediaItems) {
-      // Skip if no file data
-      if (!stockItem.fileData) {
-        console.warn(`⚠️ No file data for stock item ${stockItem.id}, skipping`);
-        continue;
-      }
-
-      try {
-        // Generate unique media ID for imported item
-        const mediaId = `stock-${Date.now()}-${Math.random()
-          .toString(36)
-          .substr(2, 9)}`;
-
-        // Create blob from saved file data
-          const fileBuffer = new Uint8Array(stockItem.fileData.fileBuffer);
-          const fileBlob = new Blob([fileBuffer], {
-            type: stockItem.fileData.fileType,
-          });
-
-        // Import using the same flow as handleFileSelect
-        const importedMedia = await importSingleFile(
-            fileBlob,
-          stockItem.fileData.fileName,
-          stockItem.fileData.fileType,
-          mediaId
-        );
-
-        if (importedMedia) {
-          // Add stock media specific metadata
-          importedMedia.source = stockItem.source;
-          importedMedia.pexelsId = stockItem.pexelsId;
-          importedMedia.photographer = stockItem.photographer;
-          importedMedia.searchQuery = stockItem.searchQuery;
-          importedMedia.name = `${stockItem.name} (${stockItem.photographer})`;
-          
-          // Add segmentId to track which transcript segment this stock media corresponds to
-          (importedMedia as any).segmentId = stockItem.segmentId;
-
-          // Handle thumbnail data for stock media items
-          if (stockItem.thumbnailData) {
-            try {
-              if (stockItem.type === 'image') {
-                // For images, convert thumbnail data to base64
-                const base64 = btoa(String.fromCharCode(...new Uint8Array(stockItem.thumbnailData.fileBuffer)));
-                const mimeType = stockItem.thumbnailData.fileType;
-                importedMedia.thumbnailUrl = `data:${mimeType};base64,${base64}`;
-              } else {
-                // For videos, convert thumbnail data to base64 (production compatible)
-                const base64 = btoa(String.fromCharCode(...new Uint8Array(stockItem.thumbnailData.fileBuffer)));
-                const mimeType = stockItem.thumbnailData.fileType;
-                importedMedia.thumbnailUrl = `data:${mimeType};base64,${base64}`;
-              }
-            } catch (thumbnailError) {
-              console.warn(`Failed to process thumbnail for stock item ${stockItem.id}:`, thumbnailError);
-              // Keep the thumbnail URL from importSingleFile as fallback
-            }
-          }
-
-          // For stock media images from backend, use the transcript segment duration instead of default 5s
-          if (stockItem.type === "image") {
-            const transcriptDuration = stockItem.endTime - stockItem.startTime;
-            importedMedia.duration = transcriptDuration;
-            console.log(`📸 STOCK IMAGE: Using transcript duration ${transcriptDuration}s instead of default 5s for ${stockItem.name}`);
-          }
-
-          importedMediaItems.push(importedMedia);
-        }
-          } catch (error) {
-            console.error(
-          `❌ Failed to import stock media ${stockItem.id}:`,
-          error
-        );
-          continue;
-        }
-      }
-
-    // 🔒 PREVENT DUPLICATES: Add imported items to media library only if they don't already exist
-    setMediaItems((prev) => {
-      const existingIds = prev.map(item => item.id);
-      const newItems = importedMediaItems.filter(item => 
-        !existingIds.includes(item.id)
-      );
-      
-      if (newItems.length > 0) {
-        console.log(`📥 IMPORT STOCK: Adding ${newItems.length} new stock media items (${importedMediaItems.length - newItems.length} duplicates skipped)`);
-        return [...prev, ...newItems];
-      } else {
-        console.log(`📥 IMPORT STOCK: All ${importedMediaItems.length} stock media items already exist, skipping duplicates`);
-        return prev;
-      }
-    });
-
-    
-    return importedMediaItems;
-  };
+    console.log("⚠️ importSavedStockMedia is deprecated - use importOpenAIGeneratedImages instead");
+    return [];
+  }; */
 
   // Add imported stock media to timeline
   const addStockMediaToTimeline = async (
     importedMediaItems: MediaItem[],
     originalStockItems: Array<{
       id: string;
-      type: "video" | "image";
+      type: "image"; // OpenAI only generates images
       width: number;
       height: number;
-      segmentId: number;
+      segmentId?: number; // Optional for strategic allocation
       startTime: number;
       endTime: number;
       duration: number;
+      paragraphNumber?: number; // Which paragraph this image represents
+      allocation?: 'sequential' | 'strategic' | 'fallback' | 'story-based';
     }>
   ) => {
     // Get current canvas dimensions for optimal sizing
@@ -3445,20 +3866,26 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     
     // Create TimelineItems for imported media
     const stockTimelineItems: TimelineItem[] = importedMediaItems
-      .map((importedMedia) => {
-        // Find the original stock item by segmentId instead of array index
-        const originalStockItem = originalStockItems.find(
-          item => item.segmentId === (importedMedia as any).segmentId
+      .map((importedMedia, index) => {
+        console.log(`🔍 Creating timeline item for media ${importedMedia.id} at index ${index}`);
+        // Find the original stock item by paragraph number or fall back to array index
+        let originalStockItem = originalStockItems.find(
+          item => item.paragraphNumber === index + 1
         );
+        
+        // Fallback: if no paragraph number, use array index
+        if (!originalStockItem) {
+          originalStockItem = originalStockItems[index];
+        }
 
         if (!originalStockItem) {
           console.warn(
-            `❌ No original stock data found for imported media ${importedMedia.id} with segmentId ${(importedMedia as any).segmentId}`
+            `❌ No original stock data found for imported media ${importedMedia.id} at index ${index}`
           );
           return null;
         }
 
-        console.log(`✅ STOCK MAPPING: Successfully mapped imported media ${importedMedia.id} to segment ${originalStockItem.segmentId}`);
+        console.log(`✅ STOCK MAPPING: Successfully mapped imported media ${importedMedia.id} to paragraph ${originalStockItem.paragraphNumber || index + 1}`);
 
         // Calculate geometry to fit the video dimensions
         const aspectRatio = originalStockItem.width / originalStockItem.height;
@@ -3480,11 +3907,28 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           y = (canvasHeight - height) / 2;
         }
 
-        return {
-          id: `timeline_pexels_${importedMedia.id}`,
+        // Calculate timing based on story-based segments or paragraph position
+        let startTime, duration;
+        
+        if (originalStockItem.allocation === 'story-based' && originalStockItem.startTime !== undefined && originalStockItem.endTime !== undefined) {
+          // Use story-based timing for complete video coverage
+          startTime = originalStockItem.startTime;
+          duration = originalStockItem.endTime - originalStockItem.startTime;
+          console.log(`⏰ STORY-BASED TIMING: Image ${originalStockItem.paragraphNumber} covers ${startTime.toFixed(1)}s to ${originalStockItem.endTime.toFixed(1)}s (duration: ${duration.toFixed(1)}s)`);
+        } else {
+          // Fallback to paragraph-based timing
+          const paragraphIndex = originalStockItem.paragraphNumber || index + 1;
+          const paragraphDuration = 5; // Each paragraph gets 5 seconds
+          startTime = (paragraphIndex - 1) * paragraphDuration;
+          duration = paragraphDuration;
+          console.log(`⏰ PARAGRAPH TIMING: Image ${paragraphIndex} at ${startTime}s for ${duration}s`);
+        }
+
+        const timelineItem = {
+          id: `timeline_openai_${importedMedia.id}`,
           mediaId: importedMedia.id, // Use the new imported media ID
-          startTime: originalStockItem.startTime,
-          duration: originalStockItem.endTime - originalStockItem.startTime,
+          startTime: startTime,
+          duration: duration,
           track: 0, // Will be updated when layer is created
           geometry: {
             x: x / canvasWidth, // Convert to relative coordinates (0-1)
@@ -3494,8 +3938,51 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             rotation: 0,
           },
         };
+
+        console.log(`📅 Created timeline item: ${timelineItem.id} at ${startTime}s for ${duration}s`);
+        return timelineItem;
       })
       .filter(Boolean) as TimelineItem[]; // Remove any null items
+
+    console.log(`📋 FINAL TIMELINE ITEMS: Created ${stockTimelineItems.length} timeline items:`, 
+      stockTimelineItems.map(item => ({
+        id: item.id,
+        mediaId: item.mediaId,
+        startTime: item.startTime,
+        duration: item.duration
+      }))
+    );
+
+    // Verify complete video coverage for story-based generation
+    if (originalStockItems.length > 0 && originalStockItems[0].allocation === 'story-based') {
+      const sortedItems = stockTimelineItems.sort((a, b) => a.startTime - b.startTime);
+      const firstItem = sortedItems[0];
+      const lastItem = sortedItems[sortedItems.length - 1];
+      const totalCoverage = lastItem ? (lastItem.startTime + lastItem.duration) - firstItem.startTime : 0;
+      
+      console.log(`🔍 COVERAGE VERIFICATION:`, {
+        totalItems: stockTimelineItems.length,
+        firstImageStart: firstItem?.startTime.toFixed(1) + 's',
+        lastImageEnd: lastItem ? (lastItem.startTime + lastItem.duration).toFixed(1) + 's' : 'N/A',
+        totalCoverage: totalCoverage.toFixed(1) + 's',
+        videoDuration: totalDuration.toFixed(1) + 's',
+        coveragePercentage: totalDuration > 0 ? ((totalCoverage / totalDuration) * 100).toFixed(1) + '%' : 'N/A'
+      });
+      
+      if (totalCoverage < totalDuration * 0.95) {
+        console.warn(`⚠️ COVERAGE WARNING: Images only cover ${(totalCoverage / totalDuration * 100).toFixed(1)}% of video duration. There may be gaps.`);
+      } else {
+        console.log(`✅ COVERAGE SUCCESS: Images cover ${(totalCoverage / totalDuration * 100).toFixed(1)}% of video duration. Complete coverage achieved!`);
+      }
+    }
+    
+    // Verify timeline items are valid
+    if (stockTimelineItems.length === 0) {
+      console.error(`❌ CRITICAL ERROR: No timeline items created for stock media!`);
+      return;
+    }
+    
+    console.log(`✅ TIMELINE VERIFICATION: ${stockTimelineItems.length} timeline items ready for layer creation`);
 
     // Follow the exact same flow as manual drag and drop (handleTimelineDrop function)
     const stocksLayerId = "stocks-layer";
@@ -3536,7 +4023,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         locked: false,
         items: stockTimelineItems,
         type: "footage",
-        duration: Math.max(...originalStockItems.map((item) => item.endTime)),
+        duration: Math.max(...stockTimelineItems.map((item) => item.startTime + item.duration)),
       };
 
       // Find the last text layer to insert stock media layer right below it
@@ -3571,10 +4058,22 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     console.log(`🎯 RESTORATION FLOW: Setting ${updatedLayers.length} layers with stock media`);
     
     // Step 1: Set layers first (this will trigger automatic sync and rendering)
+    console.log(`🎯 LAYERS: Setting ${updatedLayers.length} layers:`, updatedLayers.map(layer => ({
+      id: layer.id,
+      name: layer.name,
+      type: layer.type,
+      itemCount: layer.items?.length || 0,
+      items: layer.items?.map(item => ({ id: item.id, mediaId: item.mediaId, startTime: item.startTime }))
+    })));
+    
     setLayers(updatedLayers);
+    
+    // Step 1.5: MANUALLY SYNC timelineItems from layers to ensure they appear immediately
+    console.log(`🔄 MANUAL SYNC: Syncing timeline items from layers...`);
+    syncTimelineItemsFromLayers(updatedLayers);
 
     // Extend timeline duration if needed
-    const maxEndTime = Math.max(...originalStockItems.map((item) => item.endTime));
+    const maxEndTime = Math.max(...stockTimelineItems.map((item) => item.startTime + item.duration));
     if (maxEndTime > totalDuration) {
       setTotalDuration(maxEndTime);
     }
@@ -3603,120 +4102,328 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const createStockMediaLayer = async (
     stockMediaItems: Array<{
       id: string;
-      type: "video" | "image";
+      type: "image"; // OpenAI only generates images
       name: string;
       description: string;
       url: string;
-      fileData?: {
-        fileName: string;
-        fileBuffer: number[];
-        fileType: string;
-      };
-      thumbnailData?: {
-        fileName: string;
-        fileBuffer: number[];
-        fileType: string;
-      };
-      thumbnailUrl: string;
+      imageBuffer: string; // Base64 encoded image data
+      fileName: string;
+      contentType: string;
+      size: number;
       duration: number;
       width: number;
       height: number;
-      segmentId: number;
+      segmentId?: number; // Optional for strategic allocation
       startTime: number;
       endTime: number;
-      searchQuery: string;
-      pexelsId: number;
-      photographer: string;
-      source: string;
+      searchQuery?: string; // Optional for strategic allocation
+      prompt: string; // OpenAI prompt used to generate the image
+      source: string; // 'openai-dalle'
+      allocation: 'sequential' | 'strategic' | 'fallback' | 'story-based';
+      priority?: string; // For strategic allocation
+      strategicIndex?: number; // For strategic allocation
+      paragraphNumber?: number; // Which paragraph this image represents
     }>
   ) => {
 
     try {
-      // Step 1: Import saved stock media files using the same flow as handleFileSelect
-      const importedMediaItems = await importSavedStockMedia(stockMediaItems);
+      const importedMediaItems = await importOpenAIGeneratedImages(stockMediaItems);
 
       if (importedMediaItems.length === 0) {
-        console.warn("⚠️ No media items were successfully imported");
         return;
       }
 
-      // Step 2: Add imported media to timeline
+      setMediaItems(prev => {
+        const existingIds = prev.map(item => item.id);
+        const newItems = importedMediaItems.filter(item => !existingIds.includes(item.id));
+        
+        if (newItems.length > 0) {
+          return [...prev, ...newItems];
+        } else {
+          return prev;
+        }
+      });
+
+      // Step 2: Add imported media to timeline with paragraph information
       await addStockMediaToTimeline(importedMediaItems, stockMediaItems);
+      
+      // Step 2.5: Update stockMediaInfo state for saving to database
+      const stockMediaItemsForInfo = mediaItems.filter(
+        (item) =>
+          (item.source === "pexels" || item.source === "openai-dalle") &&
+          (item.type === "video" || item.type === "image")
+      );
+      const stockTimelineItemsForInfo = timelineItems.filter((item) =>
+        stockMediaItemsForInfo.some((media) => media.id === item.mediaId)
+      );
+
+      const newStockMediaInfo = {
+        items: stockMediaItemsForInfo.map((mediaItem) => {
+          const timelineItem = stockTimelineItemsForInfo.find(
+            (t) => t.mediaId === mediaItem.id
+          );
+          
+          // Handle both legacy Pexels and new OpenAI items
+          if (mediaItem.source === "openai-dalle") {
+            return {
+              id: mediaItem.id,
+              name: mediaItem.name,
+              type: "image" as const,
+              description: (mediaItem as any).description || mediaItem.name,
+              url: (mediaItem as any).originalOpenAIUrl || mediaItem.url || "", // Store original OpenAI URL
+              fileName: (mediaItem as any).fileName || `${mediaItem.id}.jpg`,
+              duration: mediaItem.duration || 0,
+              width: mediaItem.width || 0,
+              height: mediaItem.height || 0,
+              segmentId: (mediaItem as any).segmentId,
+              startTime: timelineItem?.startTime || 0,
+              endTime:
+                (timelineItem?.startTime || 0) +
+                (timelineItem?.duration || mediaItem.duration || 0),
+              searchQuery: mediaItem.searchQuery,
+              prompt: (mediaItem as any).openaiPrompt || "",
+              source: "openai-dalle",
+              allocation: (mediaItem as any).allocation || "sequential",
+              priority: (mediaItem as any).priority || "medium",
+              strategicIndex: (mediaItem as any).strategicIndex,
+              localFilePath: mediaItem.filePath, // Store the filesystem path
+              downloadedAt: new Date().toISOString(),
+            };
+          } else {
+            // Legacy Pexels items - convert to new format
+            return {
+              id: mediaItem.id,
+              name: mediaItem.name,
+              type: "image" as const,
+              description: mediaItem.name,
+              url: mediaItem.url || "",
+              fileName: `${mediaItem.id}.jpg`,
+              duration: mediaItem.duration || 0,
+              width: mediaItem.width || 0,
+              height: mediaItem.height || 0,
+              segmentId: undefined,
+              startTime: timelineItem?.startTime || 0,
+              endTime:
+                (timelineItem?.startTime || 0) +
+                (timelineItem?.duration || mediaItem.duration || 0),
+              searchQuery: mediaItem.searchQuery,
+              prompt: `Stock media: ${mediaItem.name}`,
+              source: "pexels-legacy",
+              allocation: "sequential",
+              priority: "medium",
+              strategicIndex: undefined,
+              localFilePath: mediaItem.filePath, // Store the filesystem path
+              downloadedAt: new Date().toISOString(),
+            };
+          }
+        }),
+        savedAt: new Date().toISOString(),
+      };
+      
+      setStockMediaInfo(newStockMediaInfo);
+      
+
 
     } catch (error) {
-      console.error("❌ Failed to create stock media layer:", error);
       throw error;
     }
   };
 
   // Function to handle stock media fetching from transcript
-  const handleFetchStockMedia = async () => {
+
+
+
+
+  // NEW: Function to handle story-based stock media generation
+  const handleStoryBasedStockMediaGeneration = useCallback(async (autoExecute: boolean = false) => {
     if (!storyId) {
       setError("Story ID is required for stock media fetching");
       return;
     }
 
-    // Get transcript segments from existing text layers
-    const textLayers = layers.filter((layer) => layer.type === "text");
-    if (textLayers.length === 0) {
-      setError("No transcript found. Please generate transcript first.");
+    // Try to get video duration from multiple sources
+    let videoDuration = totalDuration;
+    
+    if (!videoDuration || videoDuration === 0) {
+      if (savedVideoAssets?.timeline?.totalDuration) {
+        videoDuration = savedVideoAssets.timeline.totalDuration;
+      }
+      else if (audioChunks && audioChunks.length > 0) {
+        const audioDuration = audioChunks.reduce((sum, chunk) => sum + chunk.duration, 0);
+        if (audioDuration > 0) {
+          videoDuration = audioDuration;
+        }
+      }
+      else if (initialStory?.totalAudioDuration) {
+        videoDuration = initialStory.totalAudioDuration;
+      }
+      else if (initialStory?.transcriptInfo?.totalAudioDuration) {
+        videoDuration = initialStory.transcriptInfo.totalAudioDuration;
+      }
+      else if (timelineItems && timelineItems.length > 0) {
+        const timelineDuration = timelineItems.reduce((sum, item) => Math.max(sum, item.startTime + item.duration), 0);
+        if (timelineDuration > 0) {
+          videoDuration = timelineDuration;
+        }
+      }
+    }
+
+    if (!videoDuration || videoDuration === 0) {
+      setError('Video duration not available. Please ensure audio has been generated or video has been loaded.');
       return;
     }
 
-    // Show the transcript selector popup
-    setShowStockMediaTranscriptSelector(true);
-  };
+    const videoDurationMinutes = videoDuration / 60;
+    const imagesPerMinute = 5;
+    const totalImagesNeeded = Math.ceil(videoDurationMinutes * imagesPerMinute);
 
-  // Function to handle stock media generation from selected transcript
-  const handleStockMediaTranscriptSelect = async (selectedSegments: Array<{
-    id: number;
-    start: number;
-    end: number;
-    text: string;
-  }>) => {
+    // Store generation parameters
+    const generationRequest = [{
+      id: 1,
+      start: 0,
+      end: videoDuration,
+      text: `Story-based generation for ${totalImagesNeeded} images`,
+      paragraphNumber: 1,
+      isStoryBased: true,
+      totalImages: totalImagesNeeded,
+      videoDuration: videoDuration
+    }];
+
+    if (autoExecute) {
+      // Automatically execute without showing confirmation dialog
+      setPendingStockMediaRequest(generationRequest);
+      await executeStoryBasedStockMediaGeneration();
+    } else {
+      // Show confirmation dialog for manual calls
+      setShowStockMediaConfirmation(true);
+      setPendingStockMediaRequest(generationRequest);
+    }
+  }, [storyId, totalDuration, savedVideoAssets, audioChunks, initialStory, timelineItems]);
+
+  // Function to execute story-based stock media generation
+  const executeStoryBasedStockMediaGeneration = useCallback(async () => {
+    if (!pendingStockMediaRequest || !storyId) return;
+
+    // Set auto-generating state
+    setIsAutoGeneratingStockMedia(true);
+    setAutoStockMediaProgress("Starting automatic image generation...");
+
+    try {
+      const generationParams = pendingStockMediaRequest[0];
+    const totalImages = generationParams.totalImages;
+    const videoDuration = generationParams.videoDuration;
+
+    if (!totalImages || !videoDuration) {
+      setError('Missing required parameters for story-based generation');
+      return;
+    }
+
+    setTranscriptProgress(
+      `Generating ${totalImages} images based on story content (5 per minute)...`
+    );
+
+    const imageDuration = videoDuration / totalImages;
+    const overlapTime = 0.5;
+
+    // Create story-based segments for image generation with complete image plan
+    const storyBasedSegments = [];
+    for (let i = 0; i < totalImages; i++) {
+      const startTime = i * imageDuration;
+      const endTime = Math.min(startTime + imageDuration + overlapTime, videoDuration); // Ensure last image extends to video end
+      const imageNumber = i + 1;
+      
+      // Create a comprehensive image plan that the backend will use directly
+      storyBasedSegments.push({
+        id: imageNumber,
+        start: startTime,
+        end: endTime,
+        text: `Story-based image ${imageNumber} for video segment ${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s`,
+        paragraphNumber: imageNumber,
+        isStoryBased: true,
+        imageNumber: imageNumber,
+        startTime: startTime,
+        endTime: endTime,
+        // Add the complete image plan so backend just downloads images
+        prompt: `Create a beautiful, cinematic image representing a compelling story moment. Scene ${imageNumber} of ${totalImages}. This image will appear at ${startTime.toFixed(1)}s and cover until ${endTime.toFixed(1)}s in a ${(videoDuration/60).toFixed(2)} minute video. Style: High quality, professional, cinematic, suitable for storytelling. Focus on visual storytelling and scene transitions. Ensure this image can sustain viewer interest for ${(endTime - startTime).toFixed(1)} seconds.`,
+        description: `Story moment ${imageNumber} - ${startTime.toFixed(1)}s to ${endTime.toFixed(1)}s (covers ${(endTime - startTime).toFixed(1)}s)`,
+        priority: 'high',
+        allocation: 'story-based'
+      });
+    }
+
+
+    
+    const stockMediaData = await apiService.fetchStockMedia(
+      storyBasedSegments,
+      storyId,
+      totalImages
+    );
+
+
+
+    setTranscriptProgress("Creating story-based stock media layer...");
+
+    // Create stocks layer from fetched media
+    if (stockMediaData.stockMedia && stockMediaData.stockMedia.length > 0) {
+      const missingImageNumbers = stockMediaData.stockMedia.filter(item => !item.paragraphNumber);
+      if (missingImageNumbers.length > 0) {
+        stockMediaData.stockMedia.forEach((item, index) => {
+          if (!item.paragraphNumber) {
+            item.paragraphNumber = index + 1;
+          }
+        });
+      }
+      
+      await createStockMediaLayer(stockMediaData.stockMedia);
+    } else {
+      throw new Error("No stock media received from backend");
+    }
+
+    setTranscriptProgress(
+      `✅ Story-based stock media completed! ${stockMediaData.totalItems} images added to media library and timeline.`
+    );
+    
+    // Clear auto-generating state
+    setIsAutoGeneratingStockMedia(false);
+    setAutoStockMediaGenerated(true);
+    setAutoStockMediaProgress("Automatic image generation completed!");
+    
+    setTimeout(() => {
+      setIsTranscriptModalOpen(false);
+    }, 1000);
+  } catch (error) {
+    setError(error instanceof Error ? error.message : "Failed to generate stock media");
+    
+    setIsAutoGeneratingStockMedia(false);
+    setAutoStockMediaProgress("Image generation failed - you can try manually.");
+  }
+  }, [pendingStockMediaRequest, storyId, apiService]);
+
+
+
+  // Function to confirm and execute stock media generation
+  const confirmStockMediaGeneration = async () => {
+    if (!pendingStockMediaRequest) return;
     if (!storyId) {
-      setError("Story ID is required for stock media fetching");
+      setError("Story ID is required for stock media generation");
+      setShowStockMediaConfirmation(false);
       return;
     }
 
     try {
       setTranscriptProgress("Fetching related stock media...");
       setIsTranscriptModalOpen(true);
-      setShowStockMediaTranscriptSelector(false);
+      setShowStockMediaConfirmation(false);
 
-      if (selectedSegments.length === 0) {
-        setError("No transcript segments selected for stock media generation.");
+      if (pendingStockMediaRequest.length === 0) {
+        setError("No story data available for stock media generation.");
         setIsTranscriptModalOpen(false);
         return;
       }
 
-      setTranscriptProgress(
-        `Searching for media based on ${selectedSegments.length} transcript segments...`
-      );
+      // Only story-based generation is supported now
+      await executeStoryBasedStockMediaGeneration();
 
-      console.log(`🔍 STOCK MEDIA: Requesting stock media for ${selectedSegments.length} transcript segments:`, 
-        selectedSegments.map(s => ({ id: s.id, text: s.text.substring(0, 50) + '...' }))
-      );
-
-      // Call backend API for stock media fetching
-      const stockMediaData = await apiService.fetchStockMedia(
-        selectedSegments,
-        storyId
-      );
-
-      console.log(`📦 STOCK MEDIA: Received ${stockMediaData.stockMedia.length} stock media items from backend`);
-
-      setTranscriptProgress("Creating stock media layer...");
-
-      // Create stocks layer from fetched media
-      await createStockMediaLayer(stockMediaData.stockMedia);
-
-      setTranscriptProgress(
-        `✅ Stock media completed! ${stockMediaData.totalItems} items added to media library and timeline.`
-      );
-      setTimeout(() => {
-        setIsTranscriptModalOpen(false);
-      }, 1000);
     } catch (error) {
       console.error("❌ Failed to fetch stock media:", error);
       setError(
@@ -3793,8 +4500,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
       console.log(`🎙️ TRANSCRIPT: Audio file "${mediaItem.name}" starts at ${audioStartTime}s in timeline`);
 
-      // Create text layer from transcript segments with proper time offset
-      createTextLayerFromTranscript(transcript, audioStartTime);
+              // Create text layer from transcript segments with proper time offset
+        createTextLayerFromTranscript(transcript, audioStartTime, mediaItem.id);
 
       // Do not auto-generate stock media here; keep flows decoupled
       // Users can manually invoke stock generation from the Stock Media panel
@@ -3809,50 +4516,44 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
 
   // Function to automatically generate transcripts for all voiceover items
-  const autoGenerateTranscripts = async () => {
+  const autoGenerateTranscripts = useCallback(async () => {
     if (!storyId) {
       console.log("⚠️ No story ID available for automatic transcript generation");
       return;
     }
 
-    // Prevent duplicate automatic transcript generation
-    if (autoTranscriptGenerated) {
-      console.log("✅ Automatic transcript generation already completed");
+    // Only prevent duplicate automatic transcript generation if we're currently generating
+    if (isAutoGeneratingTranscripts) {
+      console.log("⚠️ Automatic transcript generation already in progress");
       return;
     }
 
-    // Get all voiceover items that don't already have transcripts
-    const voiceoverItems = mediaItems.filter(item => item.type === "voiceover");
-    const textLayers = layers.filter(layer => layer.type === "text");
+    // Check if transcripts already exist - if so, skip automatic generation
+    const existingTextLayers = layers.filter(layer => layer.type === "text");
+    const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
     
-    // Check which voiceover items already have transcripts
-    const voiceoverItemsWithTranscripts = new Set();
-    for (const layer of textLayers) {
-      for (const item of layer.items) {
-        const mediaItem = mediaItems.find(m => m.id === item.mediaId);
-        if (mediaItem && mediaItem.type === "voiceover") {
-          voiceoverItemsWithTranscripts.add(mediaItem.id);
-        }
-      }
-    }
-
-    const voiceoverItemsNeedingTranscripts = voiceoverItems.filter(
-      item => !voiceoverItemsWithTranscripts.has(item.id)
-    );
-
-    if (voiceoverItemsNeedingTranscripts.length === 0) {
-      console.log("✅ All voiceover items already have transcripts");
+    if (hasExistingTranscripts) {
+      console.log("🎙️ AUTO-TRANSCRIPT: Skipping - transcripts already exist");
+      setAutoTranscriptGenerated(true); // Mark as completed since transcripts exist
       return;
     }
 
-    console.log(`🎙️ AUTO-TRANSCRIPT: Found ${voiceoverItemsNeedingTranscripts.length} voiceover items needing transcripts`);
+    // Get all voiceover items
+    const voiceoverItems = mediaItems.filter(item => item.type === "voiceover");
+    
+    if (voiceoverItems.length === 0) {
+      console.log("⚠️ No voiceover items found for transcript generation");
+      return;
+    }
+
+    console.log(`🎙️ AUTO-TRANSCRIPT: Found ${voiceoverItems.length} voiceover items for transcript generation`);
 
     // Set progress state
     setIsAutoGeneratingTranscripts(true);
-    setAutoTranscriptProgress(`Starting transcript generation for ${voiceoverItemsNeedingTranscripts.length} voiceover items...`);
+    setAutoTranscriptProgress(`Starting transcript generation for ${voiceoverItems.length} voiceover items...`);
 
     // Generate transcripts for each voiceover item sequentially
-    for (const mediaItem of voiceoverItemsNeedingTranscripts) {
+    for (const mediaItem of voiceoverItems) {
       try {
         console.log(`🎙️ AUTO-TRANSCRIPT: Generating transcript for "${mediaItem.name}"`);
         setAutoTranscriptProgress(`Generating transcript for "${mediaItem.name}"...`);
@@ -3915,7 +4616,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         console.log(`🎙️ AUTO-TRANSCRIPT: Creating text layers for "${mediaItem.name}" starting at ${audioStartTime}s`);
 
         // Create text layer from transcript segments with proper time offset
-        createTextLayerFromTranscript(transcript, audioStartTime);
+        createTextLayerFromTranscript(transcript, audioStartTime, mediaItem.id);
 
         // Add a small delay between transcript generations to avoid overwhelming the API
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -3928,24 +4629,18 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       }
     }
 
-    console.log("🎉 AUTO-TRANSCRIPT: Automatic transcript generation completed");
     setAutoTranscriptGenerated(true);
     setIsAutoGeneratingTranscripts(false);
     setAutoTranscriptProgress("Automatic transcript generation completed!");
 
-    // After transcripts finish, auto-generate stock media without modifying transcript items
-    try {
-      await autoGenerateStockMediaFromTranscripts();
-    } catch (err) {
-      console.warn("⚠️ AUTO-STOCK: Failed to auto-generate stock media after transcripts:", err);
-    }
+    setAutoTranscriptProgress("Transcripts completed! Automatic image generation will start if needed.");
 
     // Show completion message briefly
     setShowCompletionMessage(true);
     setTimeout(() => {
       setShowCompletionMessage(false);
     }, 5000); // Hide after 5 seconds
-  };
+  }, [storyId, layers, mediaItems, timelineItems, apiService]);
 
   const renderTranscriptSelector = () => {
     const voiceoverItems = mediaItems.filter(
@@ -4014,148 +4709,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     );
   };
 
-  const renderStockMediaTranscriptSelector = () => {
-    // Get audio clips that have transcripts generated
-    const audioClips = mediaItems.filter((item) => 
-      item.type === "voiceover" || item.type === "audio"
-    );
 
-    // Get transcript segments for each audio clip from text layers
-    const audioClipsWithTranscripts: Array<{
-      id: string;
-      name: string;
-      duration: number;
-      mediaItem: MediaItem;
-      segments: Array<{
-        id: number;
-        start: number;
-        end: number;
-        text: string;
-      }>;
-    }> = [];
-
-    for (const audioClip of audioClips) {
-      // Find text layers that contain transcript segments for this audio clip
-      const textLayers = layers.filter((layer) => layer.type === "text");
-      const segments: Array<{
-        id: number;
-        start: number;
-        end: number;
-        text: string;
-      }> = [];
-
-      for (const layer of textLayers) {
-        for (const item of layer.items) {
-          const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
-          if (mediaItem && mediaItem.text) {
-            // Check if this text item corresponds to the audio clip
-            // We can match by checking if the text content matches or if they're in the same layer
-            if (mediaItem.text && audioClip.text && mediaItem.text.includes(audioClip.text) || 
-                audioClip.text && mediaItem.text && audioClip.text.includes(mediaItem.text)) {
-              segments.push({
-                id: parseInt(item.id) || segments.length,
-                start: item.startTime,
-                end: item.startTime + item.duration,
-                text: mediaItem.text,
-              });
-            }
-          }
-        }
-      }
-
-      // Only include audio clips that have transcripts
-      if (segments.length > 0) {
-        audioClipsWithTranscripts.push({
-          id: audioClip.id,
-          name: audioClip.name,
-          duration: audioClip.duration,
-          mediaItem: audioClip,
-          segments: segments,
-        });
-      }
-    }
-
-    if (audioClipsWithTranscripts.length === 0) {
-      return (
-        <div className="absolute top-full left-0 mt-1 p-4 bg-white border border-gray-200 rounded-lg shadow-lg z-50 min-w-64">
-          <p className="text-sm text-gray-500 mb-2">No audio clips with transcripts found</p>
-          <p className="text-xs text-gray-400">
-            Generate some audio clips with transcripts first to create stock media.
-          </p>
-          <Button
-            size="sm"
-            onClick={() => setShowStockMediaTranscriptSelector(false)}
-            className="mt-2 text-xs"
-          >
-            Close
-          </Button>
-        </div>
-      );
-    }
-
-    return (
-      <div className="absolute top-full left-0 mt-1 p-3 bg-white border border-gray-200 rounded-lg shadow-lg z-50 min-w-96 max-h-96 overflow-y-auto">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium">
-            Select Audio Clips for Stock Media Generation
-          </h3>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowStockMediaTranscriptSelector(false)}
-            className="text-xs h-6 w-6 p-0"
-          >
-            <X className="w-3 h-3" />
-          </Button>
-        </div>
-
-        <div className="space-y-2 mb-3">
-          {audioClipsWithTranscripts.map((audioClip) => (
-            <div
-              key={audioClip.id}
-              onClick={() => handleStockMediaTranscriptSelect(audioClip.segments)}
-              className="flex items-start justify-between p-2 hover:bg-gray-50 rounded-lg cursor-pointer border border-gray-100 hover:border-gray-200"
-            >
-              <div className="flex items-start space-x-2 flex-1">
-                <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                  <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                  </svg>
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center space-x-2 mb-1">
-                    <p className="text-sm font-medium truncate max-w-48">
-                      {audioClip.name}
-                    </p>
-                    <span className="text-xs text-gray-500">
-                      {audioClip.duration.toFixed(1)}s
-                    </span>
-                  </div>
-                  <p className="text-sm text-gray-700 line-clamp-2">
-                    {audioClip.segments.map(s => s.text).join(' ')}
-                  </p>
-                </div>
-              </div>
-              <Button size="sm" className="text-xs h-7">
-                Generate
-              </Button>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex space-x-2">
-         
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowStockMediaTranscriptSelector(false)}
-          >
-            Cancel
-          </Button>
-        </div>
-      </div>
-    );
-  };
 
   const handleFileSelect = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -4185,20 +4739,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         );
 
         if (importedMedia) {
-          // 🔒 PREVENT DUPLICATES: Add to media library only if not already exists (safety check)
           setMediaItems((prev) => {
             const existingIds = prev.map(item => item.id);
             if (!existingIds.includes(importedMedia.id)) {
-              console.log(`📂 MANUAL IMPORT: Adding new file "${importedMedia.name}"`);
               return [...prev, importedMedia];
           } else {
-              console.log(`📂 MANUAL IMPORT: File "${importedMedia.name}" already exists, skipping duplicate`);
               return prev;
             }
           });
         }
       } catch (error) {
-        console.error(`❌ Failed to import file ${file.name}:`, error);
         setError(
           error instanceof Error ? error.message : "Failed to process file"
         );
@@ -5075,9 +5625,17 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                     console.log("✅ Canvas re-initialization successful on attempt", attemptCount + 1);
                     
                     // Start automatic transcript generation after successful canvas initialization
+                    // Only if transcripts don't already exist
                     setTimeout(() => {
+                      const existingTextLayers = layers.filter(layer => layer.type === "text");
+                      const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
+                      
+                      if (!hasExistingTranscripts && !autoTranscriptGenerated) {
                       console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation...");
                       autoGenerateTranscripts();
+                      } else {
+                        console.log("🎙️ AUTO-TRANSCRIPT: Skipping - transcripts already exist or generation completed");
+                      }
                     }, 2000); // 2 second delay after canvas is ready
                     
                     return; // Success, exit the retry loop
@@ -5307,6 +5865,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             
             // Start automatic transcript generation after restoration is complete
             setTimeout(() => {
+              // Check if transcripts already exist before proceeding
+              const existingTextLayers = layers.filter(layer => layer.type === "text");
+              const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
+              
+              if (hasExistingTranscripts) {
+                console.log("🎙️ AUTO-TRANSCRIPT: Transcripts already exist after restoration, marking as completed");
+                setAutoTranscriptGenerated(true);
+                return;
+              }
+              
               console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation after restoration...");
               autoGenerateTranscripts();
             }, 3000); // 3 second delay after restoration
@@ -5317,6 +5885,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             
             // Start automatic transcript generation even if restoration had errors
             setTimeout(() => {
+              // Check if transcripts already exist before proceeding
+              const existingTextLayers = layers.filter(layer => layer.type === "text");
+              const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
+              
+              if (hasExistingTranscripts) {
+                console.log("🎙️ AUTO-TRANSCRIPT: Transcripts already exist after restoration (with errors), marking as completed");
+                setAutoTranscriptGenerated(true);
+                return;
+              }
+              
               console.log("🎙️ AUTO-TRANSCRIPT: Starting automatic transcript generation after restoration (with errors)...");
               autoGenerateTranscripts();
             }, 3000); // 3 second delay after restoration
@@ -5387,6 +5965,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       initialLoadComplete &&
       !isLoading
     ) {
+      // Check if transcripts already exist before setting the timer
+      const existingTextLayers = layers.filter(layer => layer.type === "text");
+      const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
+      
+      if (hasExistingTranscripts) {
+        console.log("🎙️ AUTO-TRANSCRIPT: Transcripts already exist, marking as completed");
+        setAutoTranscriptGenerated(true);
+        return;
+      }
+      
       // Add a delay to ensure everything is properly initialized
       const timer = setTimeout(() => {
         console.log("🎙️ AUTO-TRANSCRIPT: Triggering automatic transcript generation from useEffect...");
@@ -5401,7 +5989,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     autoTranscriptGenerated,
     initialLoadComplete,
     isLoading,
-    autoGenerateTranscripts
+    autoGenerateTranscripts,
+    layers
   ]);
 
   // Reset auto-transcript state when new audio chunks are added
@@ -5419,6 +6008,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     }
   }, [audioChunks, autoTranscriptGenerated, lastProcessedAudioChunksLength]);
 
+  useEffect(() => {
+    if (storyId && !isAutoGeneratingStockMedia && !autoStockMediaGenerated && showCompletionMessage) {
+      const imageItems = mediaItems.filter(item => item.type === "image");
+      
+      if (imageItems.length === 0) {
+        handleStoryBasedStockMediaGeneration(true);
+      }
+    }
+  }, [storyId, mediaItems, isAutoGeneratingStockMedia, autoStockMediaGenerated, showCompletionMessage, handleStoryBasedStockMediaGeneration]);
+
   // Get video aspect ratio class based on video style
   const getVideoAspectRatio = () => {
     switch (videoStyle) {
@@ -5431,23 +6030,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         return "aspect-video";
     }
   };
-  // Save video assets when state changes
   const saveVideoAssets = () => {
     if (!onVideoAssetsUpdate) return;
-
-    // 📝 LOG TEXT ITEMS BEING SAVED
-    const textItems = mediaItems.filter(item => item.type === "text");
-    if (textItems.length > 0) {
-      console.log(`💾 SAVE TO DB: Saving ${textItems.length} text items to database:`, 
-        textItems.map(item => ({
-          id: item.id,
-          name: item.name,
-          text: item.text?.substring(0, 50) + (item.text && item.text.length > 50 ? "..." : ""),
-          fontFamily: item.fontFamily,
-          fontSize: item.fontSize
-        }))
-      );
-    }
 
     // Collect transcript info for debugging
     const transcriptInfo = {
@@ -5468,40 +6052,71 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     // Collect stock media info with local file paths and timestamps
     const stockMediaItems = mediaItems.filter(
       (item) =>
-        item.source === "pexels" &&
+        (item.source === "pexels" || item.source === "openai-dalle") &&
         (item.type === "video" || item.type === "image")
     );
     const stockTimelineItems = timelineItems.filter((item) =>
       stockMediaItems.some((media) => media.id === item.mediaId)
     );
 
-    const stockMediaInfo = {
+    const stockMediaInfo: NonNullable<SavedVideoAssets['stockMediaInfo']> = {
       items: stockMediaItems.map((mediaItem) => {
         const timelineItem = stockTimelineItems.find(
           (t) => t.mediaId === mediaItem.id
         );
-        return {
-          id: mediaItem.id,
-          name: mediaItem.name,
-          type: mediaItem.type as "video" | "image",
-          pexelsId: mediaItem.pexelsId ? String(mediaItem.pexelsId) : undefined,
-          photographer: mediaItem.photographer,
-          localFilePath: mediaItem.filePath || "",
-          thumbnailLocalPath: mediaItem.thumbnailUrl?.startsWith("blob:")
-            ? ""
-            : mediaItem.thumbnailUrl || "",
-          originalUrl: "", // Will be populated from Pexels data when needed
-          width: mediaItem.width || 0,
-          height: mediaItem.height || 0,
-          duration: mediaItem.duration || 0,
-          startTime: timelineItem?.startTime || 0,
-          endTime:
-            (timelineItem?.startTime || 0) +
-            (timelineItem?.duration || mediaItem.duration || 0),
-          track: timelineItem?.track || 0,
-          searchQuery: mediaItem.searchQuery,
-          downloadedAt: new Date().toISOString(),
-        };
+        
+        // Handle both legacy Pexels and new OpenAI items
+        if (mediaItem.source === "openai-dalle") {
+          return {
+            id: mediaItem.id,
+            name: mediaItem.name,
+            type: "image" as const, // OpenAI only generates images
+            description: (mediaItem as any).description || mediaItem.name,
+            url: mediaItem.url || "",
+            fileName: (mediaItem as any).fileName || `${mediaItem.id}.jpg`,
+            duration: mediaItem.duration || 0,
+            width: mediaItem.width || 0,
+            height: mediaItem.height || 0,
+            segmentId: (mediaItem as any).segmentId,
+            startTime: timelineItem?.startTime || 0,
+            endTime:
+              (timelineItem?.startTime || 0) +
+              (timelineItem?.duration || mediaItem.duration || 0),
+            searchQuery: mediaItem.searchQuery,
+            prompt: (mediaItem as any).openaiPrompt || "",
+            source: "openai-dalle",
+            allocation: (mediaItem as any).allocation || "sequential",
+            priority: (mediaItem as any).priority || "medium",
+            strategicIndex: (mediaItem as any).strategicIndex,
+            localFilePath: mediaItem.filePath, // Save the Electron AppData file path
+            downloadedAt: new Date().toISOString(),
+          };
+        } else {
+          // Legacy Pexels items - convert to new format
+          return {
+            id: mediaItem.id,
+            name: mediaItem.name,
+            type: "image" as const, // Convert all to images for consistency
+            description: mediaItem.name,
+            url: mediaItem.url || "",
+            fileName: `${mediaItem.id}.jpg`,
+            duration: mediaItem.duration || 0,
+            width: mediaItem.width || 0,
+            height: mediaItem.height || 0,
+            segmentId: undefined,
+            startTime: timelineItem?.startTime || 0,
+            endTime:
+              (timelineItem?.startTime || 0) +
+              (timelineItem?.duration || mediaItem.duration || 0),
+            searchQuery: mediaItem.searchQuery,
+            prompt: `Stock media: ${mediaItem.name}`,
+            source: "pexels-legacy",
+            allocation: "sequential",
+            priority: "medium",
+            strategicIndex: undefined,
+            downloadedAt: new Date().toISOString(),
+          };
+        }
       }),
       savedAt: new Date().toISOString(),
     };
@@ -5613,29 +6228,28 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     onVideoAssetsUpdate(videoAssets);
 
     // CRITICAL: Pass transcript and stock media info to parent for database storage
-    if (onTranscriptInfoUpdate) {
+    if (onTranscriptInfoUpdate && transcriptInfo) {
       onTranscriptInfoUpdate(transcriptInfo);
     }
 
-    if (onStockMediaInfoUpdate) {
+    if (onStockMediaInfoUpdate && stockMediaInfo) {
       onStockMediaInfoUpdate(stockMediaInfo);
     }
   };
 
-  // Reset transcript restoration flag when savedVideoAssets changes
   useEffect(() => {
-    setTranscriptRestored(false);
-  }, [savedVideoAssets]);
-  // Add restore function to handle saved video assets
+    const hasTranscriptItems = mediaItems.some(item => item.type === "text" || item.source === "transcript");
+    if (!hasTranscriptItems) {
+      setTranscriptRestored(false);
+    }
+  }, [savedVideoAssets, mediaItems]);
   const restoreVideoAssets = async () => {
     if (!savedVideoAssets) {
       return;
     }
 
-    // Store transcript info for later restoration (after layers are restored)
     const storedTranscriptInfo = savedVideoAssets.transcriptInfo;
 
-    // **NEW: Restore sentence transcripts as text timeline items**
     if (initialStory?.sentenceTranscripts?.sentences?.length > 0) {
       try {
         // Get current canvas dimensions for text sizing
@@ -5685,14 +6299,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             };
           });
 
-        // 📝 PREVENT DUPLICATES: Add restored text media items only if they don't exist
         setMediaItems((prev) => {
           const existingTextIds = prev.filter(item => item.type === "text").map(item => item.id);
           const newTextItems = restoredTextMediaItems.filter(textItem => 
             !existingTextIds.includes(textItem.id)
           );
           if (newTextItems.length > 0) {
-            console.log(`📝 RESTORE TRANSCRIPT: Adding ${newTextItems.length} text media items from sentence transcripts`);
             return [...prev, ...newTextItems];
           }
           return prev;
@@ -5713,7 +6325,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             );
             
             if (newTextTimelineItems.length > 0) {
-              console.log(`📝 RESTORE TRANSCRIPT: Adding ${newTextTimelineItems.length} text timeline items to existing text layer`);
             updatedLayers[existingTextLayerIndex] = {
               ...updatedLayers[existingTextLayerIndex],
               items: [
@@ -5733,19 +6344,16 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               locked: false,
               items: restoredTextTimelineItems,
             };
-            console.log(`📝 RESTORE TRANSCRIPT: Creating new text layer with ${restoredTextTimelineItems.length} text items`);
             return [...prevLayers, newTextLayer];
           }
         });
 
-        // 📝 PREVENT DUPLICATES: Add timeline items to global timeline (check for duplicates)
         setTimelineItems((prev) => {
           const existingTimelineIds = prev.map(item => item.id);
           const newTimelineItems = restoredTextTimelineItems.filter(textItem => 
             !existingTimelineIds.includes(textItem.id)
           );
           if (newTimelineItems.length > 0) {
-            console.log(`📝 RESTORE TRANSCRIPT: Adding ${newTimelineItems.length} text timeline items to global timeline`);
             return [...prev, ...newTimelineItems];
           }
           return prev;
@@ -5760,11 +6368,10 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         if (maxEndTime > totalDuration) {
           setTotalDuration(maxEndTime);
         }
+        
+
       } catch (error) {
-        console.error(
-          "❌ RESTORE: Failed to restore sentence transcripts:",
-          error
-        );
+        // Handle error silently
       }
     }
 
@@ -5779,50 +6386,122 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
         for (const stockItem of stockMediaInfo.items) {
           try {
-            // Load the saved file as blob URL
-            const blobUrl = await mediaStorageService.loadMediaFile(
-              stockItem.localFilePath
-            );
-
-            let thumbnailUrl = "";
-            if (stockItem.type === "video") {
-              try {
-                thumbnailUrl = await generateVideoThumbnail(blobUrl);
-              } catch (error) {
-                console.warn(
-                  `❌ Failed to generate video thumbnail for restored ${stockItem.id}:`,
-                  error
-                );
-                // Don't fallback to blob URL - use a placeholder or retry
-                thumbnailUrl = ""; // Empty string will show default video icon
+            console.log(`🔄 Restoring stock media item: ${stockItem.id} (${stockItem.source})`);
+            
+            let filePath: string = "";
+            let previewUrl: string = "";
+            let thumbnailUrl: string = "";
+            
+            if (stockItem.source === "openai-dalle") {
+              // For OpenAI images, they are now saved to Electron AppData directory
+              // Check if we have a filesystem path or need to use the URL
+              const filesystemPath = (stockItem as any).localFilePath || (stockItem as any).filePath;
+              
+              if (filesystemPath && !filesystemPath.startsWith('http')) {
+                // Use the saved filesystem path - load from Electron AppData
+                filePath = filesystemPath;
+                try {
+                  // Load the image from Electron AppData using mediaStorageService
+                  const base64Url = await mediaStorageService.loadImageAsBase64(filesystemPath);
+                  previewUrl = base64Url;
+                  thumbnailUrl = base64Url;
+                  console.log(`🖼️ OpenAI image: Loaded from Electron AppData - ${filesystemPath}`);
+                } catch (error) {
+                  console.warn(`⚠️ Failed to load OpenAI image from Electron AppData ${stockItem.id}:`, error);
+                  // Fall back to base64 conversion if available
+                  if (stockItem.url) {
+                    try {
+                      const base64Url = await convertUrlToBase64(stockItem.url);
+                      previewUrl = base64Url;
+                      thumbnailUrl = base64Url;
+                    } catch (fallbackError) {
+                      console.warn(`⚠️ Failed to convert OpenAI image URL to base64 ${stockItem.id}:`, fallbackError);
+                      filePath = stockItem.url;
+                      previewUrl = stockItem.url;
+                      thumbnailUrl = stockItem.url;
+                    }
+                  }
+                }
+              } else if (filesystemPath && filesystemPath.startsWith('http') && filesystemPath.includes('localhost:5555/api/media/openai-image')) {
+                // Old backend URL - try to convert to base64
+                try {
+                  const base64Url = await convertUrlToBase64(filesystemPath);
+                  filePath = filesystemPath; // Keep original URL for reference
+                  previewUrl = base64Url;
+                  thumbnailUrl = base64Url;
+                  console.log(`🖼️ OpenAI image: Converted old backend URL to base64 - ${base64Url.substring(0, 50)}...`);
+                } catch (error) {
+                  console.warn(`⚠️ Failed to convert old backend URL to base64 ${stockItem.id}:`, error);
+                  filePath = filesystemPath;
+                  previewUrl = filesystemPath;
+                  thumbnailUrl = filesystemPath;
+                }
+              } else {
+                // No filesystem path, convert URL to base64
+                try {
+                  const base64Url = await convertUrlToBase64(stockItem.url);
+                  filePath = stockItem.url; // Keep original URL for reference
+                  previewUrl = base64Url;
+                  thumbnailUrl = base64Url;
+                  console.log(`🖼️ OpenAI image: Converted URL to base64 - ${base64Url.substring(0, 50)}...`);
+                } catch (error) {
+                  console.warn(`⚠️ Failed to convert OpenAI image to base64 ${stockItem.id}:`, error);
+                  // Fall back to direct URL (may cause CORS issues)
+                  filePath = stockItem.url;
+                  previewUrl = stockItem.url;
+                  thumbnailUrl = stockItem.url;
+                }
               }
-            } else if (stockItem.type === "image") {
-              // Use base64 data URL for images (production compatible)
+            } else {
+              // For legacy items, try to load from file path
               try {
-                thumbnailUrl = await mediaStorageService.loadImageAsBase64(stockItem.localFilePath);
+                const localFilePath = (stockItem as any).localFilePath || stockItem.url;
+                if (localFilePath.startsWith('http')) {
+                  // Network URL - convert to base64
+                  try {
+                    const base64Url = await convertUrlToBase64(localFilePath);
+                    filePath = localFilePath; // Keep original URL for reference
+                    previewUrl = base64Url;
+                    thumbnailUrl = base64Url;
+                  } catch (error) {
+                    console.warn(`⚠️ Failed to convert legacy URL to base64 ${stockItem.id}:`, error);
+                    filePath = localFilePath;
+                    previewUrl = localFilePath;
+                    thumbnailUrl = localFilePath;
+                  }
+                } else {
+                  // Filesystem path - load as base64
+                  const base64Url = await mediaStorageService.loadImageAsBase64(localFilePath);
+                  filePath = localFilePath;
+                  previewUrl = base64Url;
+                  thumbnailUrl = base64Url;
+                }
+                console.log(`🖼️ Legacy image: Loaded from filesystem - ${localFilePath}`);
               } catch (error) {
-                console.warn(`❌ Failed to load image as base64 for restored stock item ${stockItem.id}:`, error);
-                thumbnailUrl = blobUrl; // Fallback to blob URL
+                console.warn(`⚠️ Failed to load legacy image ${stockItem.id}:`, error);
+                // Use URL as fallback
+                filePath = stockItem.url;
+                previewUrl = stockItem.url;
+                thumbnailUrl = stockItem.url;
               }
             }
 
-            // Create MediaItem with blob URL
+            // Create MediaItem with proper URLs
             const restoredMediaItem: MediaItem = {
               id: stockItem.id,
               name: stockItem.name,
               type: stockItem.type,
-              source: "pexels",
-              filePath: stockItem.localFilePath,
-              previewUrl: blobUrl,
+              source: stockItem.source || "unknown",
+              filePath: filePath,
+              previewUrl: previewUrl,
               thumbnailUrl: thumbnailUrl,
               duration: stockItem.duration || 0,
-              width: stockItem.width,
-              height: stockItem.height,
+              width: stockItem.width || 0,
+              height: stockItem.height || 0,
               volume: 60,
-              pexelsId: stockItem.pexelsId
-                ? Number(stockItem.pexelsId)
-                : undefined,
-              photographer: stockItem.photographer,
+              // Handle legacy Pexels properties
+              pexelsId: (stockItem as any).pexelsId ? Number((stockItem as any).pexelsId) : undefined,
+              photographer: (stockItem as any).photographer,
               searchQuery: stockItem.searchQuery,
             };
 
@@ -5832,16 +6511,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               startTime: stockItem.startTime,
               duration: stockItem.duration || 0,
               mediaId: stockItem.id,
-              track: stockItem.track,
+              track: 0, // Default track for restored items
             };
 
             restoredStockItems.push(restoredMediaItem);
             restoredStockTimelineItems.push(restoredTimelineItem);
-          } catch (error) {
-            console.error(
-              `❌ Failed to restore stock media item ${stockItem.id}:`,
-              error
-            );
+          } catch {
             continue;
           }
         }
@@ -5855,10 +6530,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             );
             
             if (newStockItems.length > 0) {
-              console.log(`📦 RESTORE STOCK: Adding ${newStockItems.length} restored stock media items (${restoredStockItems.length - newStockItems.length} duplicates skipped)`);
               return [...prev, ...newStockItems];
             } else {
-              console.log(`📦 RESTORE STOCK: All ${restoredStockItems.length} stock media items already exist, skipping duplicates`);
               return prev;
             }
           });
@@ -5879,7 +6552,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               );
               
               if (newTimelineItems.length > 0) {
-                console.log(`📋 RESTORE LAYER: Adding ${newTimelineItems.length} timeline items to existing stocks layer (${restoredStockTimelineItems.length - newTimelineItems.length} duplicates skipped)`);
               updated[existingStocksLayerIndex] = {
                 ...updated[existingStocksLayerIndex],
                 items: [
@@ -5891,8 +6563,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   Math.max(...stockMediaInfo.items.map((item) => item.endTime))
                 ),
               };
-              } else {
-                console.log(`📋 RESTORE LAYER: All ${restoredStockTimelineItems.length} timeline items already exist in stocks layer, skipping duplicates`);
               }
             } else {
               // Create new stocks layer
@@ -5915,7 +6585,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             return updated;
           });
 
-          // 🔒 PREVENT DUPLICATES: Add stock timeline items to global timeline only if they don't already exist
           setTimelineItems((prev) => {
             const existingIds = prev.map(item => item.id);
             const newTimelineItems = restoredStockTimelineItems.filter(item => 
@@ -5923,10 +6592,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             );
             
             if (newTimelineItems.length > 0) {
-              console.log(`⏰ RESTORE TIMELINE: Adding ${newTimelineItems.length} restored stock timeline items (${restoredStockTimelineItems.length - newTimelineItems.length} duplicates skipped)`);
               return [...prev, ...newTimelineItems];
             } else {
-              console.log(`⏰ RESTORE TIMELINE: All ${restoredStockTimelineItems.length} stock timeline items already exist, skipping duplicates`);
               return prev;
             }
           });
@@ -5937,10 +6604,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             try {
               await loadMediaElement(mediaItem);
             } catch (error) {
-              console.error(
-                `❌ Failed to load stock media element ${mediaItem.id}:`,
-                error
-              );
+              // Handle error silently
             }
           }
 
@@ -5968,7 +6632,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     try {
       setIsLoading(true);
 
-      // Restore media library
       if (savedVideoAssets.mediaLibrary?.length) {
         const restoredMedia = await Promise.all(
           savedVideoAssets.mediaLibrary.map(
@@ -6141,10 +6804,40 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             }
           }
         });
+        
+        // CRITICAL: Load media elements for restored media library items
+        console.log("📁 LOADING: Loading media elements for restored media library items...");
+        for (const mediaItem of validMediaItems) {
+          // Skip text items as they don't need to be loaded into refs
+          if (mediaItem.type === "text") {
+            console.log(`📝 SKIP LOAD: Text item ${mediaItem.id} doesn't need loading (rendered directly)`);
+            continue;
+          }
+          
+          try {
+            await loadMediaElement(mediaItem);
+            console.log(`✅ LOADED: Successfully loaded media element for ${mediaItem.id} (${mediaItem.type})`);
+          } catch (error) {
+            console.error(`❌ LOAD FAIL: Failed to load media element for ${mediaItem.id}:`, error);
+          }
+        }
       }
 
       // 📝 PRESERVE EXISTING LIFTED STATE: Restore layers and timeline items
       if (savedVideoAssets.layers?.length) {
+        console.log(`📚 RESTORE: Found ${savedVideoAssets.layers.length} layers to restore`);
+        console.log("📚 RESTORE: Layers:", savedVideoAssets.layers.map(layer => ({
+          id: layer.id,
+          name: layer.name,
+          type: layer.type,
+          itemsCount: layer.items?.length || 0,
+          items: layer.items?.map(item => ({
+            id: item.id,
+            mediaId: item.mediaId,
+            startTime: item.startTime,
+            duration: item.duration
+          })) || []
+        })));
         setLayers(prev => {
           if (prev.length <= 1) { // Only voice layer exists
             // No user layers, use restored layers
@@ -6200,8 +6893,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
         });
 
         // CRITICAL: Restore transcript data AFTER layer restoration to prevent override
-        if (transcriptRestored) {
-        } else if (storedTranscriptInfo) {
+        if (storedTranscriptInfo) {
+          console.log("📝 RESTORE: Found stored transcript info, attempting restoration...");
           const transcriptInfo = storedTranscriptInfo;
 
           if (
@@ -6218,11 +6911,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 transcriptChunkIds.includes(item.id)
             );
 
+            // Only skip if we have ALL the transcript items AND transcriptRestored is true
             if (
-              existingTranscriptItems.length ===
-              transcriptInfo.audioChunks.length
+              existingTranscriptItems.length === transcriptInfo.audioChunks.length &&
+              transcriptRestored
             ) {
-              setTranscriptRestored(true);
+              console.log("📝 RESTORE: Transcript items already exist and transcriptRestored is true, skipping restoration");
               return;
             }
 
@@ -6405,20 +7099,37 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       if (savedVideoAssets.audioChunks?.length) {
       }
 
+      // CRITICAL: Force a final render after all restoration is complete
+      console.log("🎨 FINAL RENDER: Triggering final render after restoration...");
+      setTimeout(() => {
+        if (canvasInitializedRef.current) {
+          renderPreviewFrame(currentTime, 0);
+          console.log("✅ FINAL RENDER: Final render completed");
+        } else {
+          console.warn("⚠️ FINAL RENDER: Canvas not initialized, skipping final render");
+        }
+      }, 500);
+
+      console.log("✅ RESTORE: Video assets restoration completed successfully");
       setIsLoading(false);
+      setIsRestoringVideoAssets(false);
     } catch (error) {
-      console.error("Error restoring video assets:", error);
+      console.error("❌ RESTORE: Error restoring video assets:", error);
       setError("Failed to restore video assets");
       setIsLoading(false);
+      setIsRestoringVideoAssets(false);
     }
   };
 
   // Call restoreVideoAssets when component mounts and savedVideoAssets changes
   useEffect(() => {
-    if (savedVideoAssets && !audioRestored && !isRestoringAudio) {
+    if (savedVideoAssets && !audioRestored && !isRestoringAudio && !isRestoringVideoAssets) {
+      // Remove transcriptRestored condition to allow initial restoration
+      console.log("🔄 RESTORE: Starting video assets restoration...");
+      setIsRestoringVideoAssets(true);
       restoreVideoAssets();
     }
-  }, [savedVideoAssets, audioRestored, isRestoringAudio, transcriptRestored]);
+  }, [savedVideoAssets, audioRestored, isRestoringAudio, isRestoringVideoAssets]);
 
   // Auto-save video assets when relevant state changes
   useEffect(() => {
@@ -6939,6 +7650,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   const handleTimeRulerClick = async (
     event: React.MouseEvent<HTMLDivElement>
   ) => {
+    console.log("🎬 Time ruler clicked!");
+    console.log(`🎬 Current playback state: isPlaying=${isPlaying}`);
     if (!timeRulerRef.current) return;
 
     // Lock the ruler spacing cache during this interaction to prevent tick changes
@@ -6958,6 +7671,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     startTimeRef.current = performance.now();
     pausedTimeRef.current = newTime;
     setCurrentTime(newTime);
+    
+    // Seek all media elements to the new time
+    console.log(`🎬 Time ruler: About to call seekAllMediaToTime with time: ${newTime.toFixed(2)}s`);
+    seekAllMediaToTime(newTime);
+    console.log(`🎬 Time ruler: seekAllMediaToTime completed`);
+    
     // await seekToTime(newTime);
     renderPreviewFrame(newTime);
 
@@ -7244,11 +7963,33 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
       return (
         <div className="flex-shrink-0 w-10 h-10 bg-gray-100 rounded-lg overflow-hidden">
-          <img
-            src={thumbnailSrc}
-            alt={item.name}
-            className="w-full h-full object-cover"
-          />
+          {thumbnailSrc ? (
+            <img
+              src={thumbnailSrc}
+              alt={item.name}
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                console.warn(`Failed to load thumbnail for ${item.name}:`, e);
+                // If thumbnail fails, try to generate one from the file path
+                if (item.filePath && !item.thumbnailUrl) {
+                  // Load thumbnail asynchronously
+                  loadImageAsBase64(item.filePath).then(base64Url => {
+                    setMediaItems(prev => prev.map(mediaItem => 
+                      mediaItem.id === item.id 
+                        ? { ...mediaItem, thumbnailUrl: base64Url }
+                        : mediaItem
+                    ));
+                  }).catch(error => {
+                    console.error(`❌ Failed to load thumbnail for ${item.name}:`, error);
+                  });
+                }
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+            </div>
+          )}
         </div>
       );
     } else if (item.type === "video" && item.thumbnailUrl) {
@@ -7671,19 +8412,6 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     setDraggedTimelineItem(null);
   };
 
-  // Helper function to sync timelineItems with layers
-  const syncTimelineItemsFromLayers = (updatedLayers: Layer[]) => {
-    const allTimelineItems: TimelineItem[] = [];
-    updatedLayers.forEach((layer) => {
-      if (layer.items) {
-        allTimelineItems.push(...layer.items);
-      }
-    });
-    setTimelineItems(allTimelineItems);
-
-    // Debug: Show timeline item details
-  };
-
   const handleRemoveTimelineItem = (itemId: string) => {
     // Update layers
     const updatedLayers = layers.map((layer) => ({
@@ -7697,10 +8425,125 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     syncTimelineItemsFromLayers(updatedLayers);
   };
 
+
+
+  // Function to seek all media elements to a specific time
+  const seekAllMediaToTime = (time: number) => {
+    console.log(`🎬 seekAllMediaToTime called with time: ${time.toFixed(2)}s`);
+    console.log(`🎬 Available video elements: ${videoElementsRef.current.size}`);
+    console.log(`🎬 Available audio elements: ${audioElementsRef.current.size}`);
+    console.log(`🎬 Current isPlaying state: ${isPlaying}`);
+
+    // First, pause all currently playing media to prevent overlapping audio
+    const wasPlaying = isPlaying;
+    if (wasPlaying) {
+      console.log(`🎬 Pausing playback for seeking...`);
+      
+      // Use the existing pause system to properly stop all media
+      pauseTimeline();
+      
+      // Clear the currently playing refs to ensure clean state
+      currentlyPlayingAudiosRef.current.length = 0;
+      currentlyPlayingVideosRef.current.length = 0;
+    }
+
+    // Force stop and reset ALL audio elements to prevent overlapping playback
+    console.log(`🎬 Force stopping all audio elements...`);
+    audioElementsRef.current.forEach((audio, mediaId) => {
+      if (audio) {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.load(); // Force reload to reset audio state
+          console.log(`🎬 Force reset audio element ${mediaId}`);
+        } catch (error) {
+          console.error(`❌ Error resetting audio ${mediaId}:`, error);
+        }
+      }
+    });
+
+    // Force stop and reset ALL video elements
+    console.log(`🎬 Force stopping all video elements...`);
+    videoElementsRef.current.forEach((video, mediaId) => {
+      if (video) {
+        try {
+          video.pause();
+          video.currentTime = 0;
+          console.log(`🎬 Force reset video element ${mediaId}`);
+        } catch (error) {
+          console.error(`❌ Error resetting video ${mediaId}:`, error);
+        }
+      }
+    });
+
+    // Small delay to ensure all elements are fully stopped before seeking
+    console.log(`🎬 Waiting for elements to fully stop...`);
+    setTimeout(() => {
+      console.log(`🎬 Elements stopped, now seeking...`);
+      
+      // Seek video elements
+    try {
+      videoElementsRef.current.forEach((video, mediaId) => {
+        if (video && !isNaN(video.duration)) {
+          // Find the timeline item for this video
+          const timelineItem = timelineItems.find(item => item.mediaId === mediaId);
+          
+          if (timelineItem) {
+            // Calculate the offset within the video's timeline
+            const videoOffset = Math.max(0, time - timelineItem.startTime);
+            if (videoOffset <= timelineItem.duration) {
+              video.currentTime = videoOffset;
+              console.log(`🎬 Video ${mediaId} seeked to ${videoOffset.toFixed(2)}s (timeline: ${time.toFixed(2)}s)`);
+            }
+          }
+        }
+      });
+    } catch (error) {
+      console.error(`❌ Error seeking video elements:`, error);
+    }
+
+    // Seek audio/voiceover elements
+    try {
+      audioElementsRef.current.forEach((audio, mediaId) => {
+        if (audio && !isNaN(audio.duration)) {
+          // Find the timeline item for this audio
+          const timelineItem = timelineItems.find(item => item.mediaId === mediaId);
+          
+          if (timelineItem) {
+            // Calculate the offset within the audio's timeline
+            const audioOffset = Math.max(0, time - timelineItem.startTime);
+            if (audioOffset <= timelineItem.duration) {
+              audio.currentTime = audioOffset;
+              console.log(`🎬 Audio ${mediaId} seeked to ${audioOffset.toFixed(2)}s (timeline: ${time.toFixed(2)}s)`);
+            }
+          }
+        }
+      });
+    } catch (error) {
+      console.error(`❌ Error seeking audio elements:`, error);
+    }
+
+    // Resume playback if it was playing before seeking
+    if (wasPlaying) {
+      console.log(`🎬 Resuming playback after seeking...`);
+      // Use the existing play system to properly resume
+      setTimeout(() => {
+        playTimeline();
+      }, 100); // Small delay to ensure seeking is complete
+    }
+    }, 200); // Wait 200ms for elements to fully stop
+  };
+
+
+
   // Update renderTimelineItem to mark resize handles and selection
   const renderTimelineItem = (item: TimelineItem) => {
-    const mediaItem = mediaItems.find((m) => m.id === item.mediaId);
-    if (!mediaItem) return null;
+    const itemMedia = mediaItems.find((m) => m.id === item.mediaId);
+    if (!itemMedia) {
+      console.warn(`⚠️ TIMELINE RENDER: Media item not found for timeline item ${item.id} with mediaId ${item.mediaId}`);
+      console.warn(`⚠️ TIMELINE RENDER: Available media items:`, mediaItems.map(m => ({ id: m.id, name: m.name, type: m.type })));
+      return null;
+    }
 
     const layer = layers.find((l) => l.items.some((i) => i.id === item.id));
     const isLocked = layer?.locked || false;
@@ -7731,18 +8574,18 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     return (
       <div
         key={item.id}
-        className={`absolute top-1 h-6 rounded-sm flex items-center px-2 select-none
+        className={`absolute top-1 h-5 rounded-sm flex items-center px-2 select-none
           ${isLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}
           ${isDragging ? "shadow-lg z-30" : ""}
           ${isItemResizing ? "shadow-lg z-40" : ""}
           ${isSelected ? "z-20" : "z-10"}
           group
           ${
-            mediaItem.type === "video"
+            itemMedia.type === "video"
               ? "bg-purple-100 border border-purple-500"
-              : mediaItem.type === "image"
+              : itemMedia.type === "image"
               ? "bg-green-100 border border-green-500"
-              : mediaItem.type === "text"
+              : itemMedia.type === "text"
               ? "bg-orange-100 border border-orange-500"
               : "bg-blue-100 border border-blue-500"
           }
@@ -7765,11 +8608,11 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           // Add inset border for selection without expanding boundaries
           boxShadow: isSelected
             ? `inset 0 0 0 2px ${
-                mediaItem.type === "video"
+                itemMedia.type === "video"
                   ? "#7c3aed"
-                  : mediaItem.type === "image"
+                  : itemMedia.type === "image"
                   ? "#059669"
-                  : mediaItem.type === "text"
+                  : itemMedia.type === "text"
                   ? "#ea580c"
                   : "#2563eb"
               }`
@@ -7826,7 +8669,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             onClick={handleTimelineItemClick}
             title={isSelected ? "Press Delete or Backspace to remove" : ""}
           >
-            {mediaItem.name}
+            {itemMedia.name}
           </span>
 
         </div>
@@ -8002,10 +8845,22 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
     const renderTextControls = () => (
       <div className="space-y-4">
-        <h4 className="font-semibold text-gray-900 flex items-center">
-          <Type className="w-4 h-4 mr-2" />
-          Text Styling
-        </h4>
+        <div className="flex items-center justify-between">
+          <h4 className="font-semibold text-gray-900 flex items-center">
+            <Type className="w-4 h-4 mr-2" />
+            Subtitle Styling
+          </h4>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => restoreTextDefaults(selectedMedia.id)}
+            className="text-xs flex items-center gap-1 px-2 py-1 h-7"
+            title="Restore default styling"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Reset
+          </Button>
+        </div>
 
         {/* Font Family */}
         <div>
@@ -8021,15 +8876,34 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             }
             className="w-full text-xs border border-gray-300 rounded px-2 py-1"
           >
-            <option value="Arial">Arial</option>
-            <option value="Helvetica">Helvetica</option>
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Georgia">Georgia</option>
-            <option value="Verdana">Verdana</option>
-            <option value="Trebuchet MS">Trebuchet MS</option>
-            <option value="Comic Sans MS">Comic Sans MS</option>
-            <option value="Impact">Impact</option>
+            {systemFonts.map((font) => (
+              <option key={font} value={font} style={{ fontFamily: font }}>
+                {font}
+              </option>
+            ))}
           </select>
+        </div>
+
+        {/* Font Size */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Font Size
+          </label>
+          <div className="flex items-center gap-2">
+            <Slider
+              value={[selectedMedia.fontSize || 24]}
+              onValueChange={([value]) =>
+                updateMediaItemProperties(selectedMedia.id, { fontSize: value })
+              }
+              min={8}
+              max={72}
+              step={1}
+              className="flex-1"
+            />
+            <span className="text-xs text-gray-500 min-w-[2rem] text-right">
+              {selectedMedia.fontSize || 24}px
+            </span>
+          </div>
         </div>
 
         {/* Font Style Buttons */}
@@ -8037,7 +8911,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           <label className="text-xs font-medium text-gray-700 block mb-2">
             Font Style
           </label>
-          <div className="flex space-x-2">
+          <div className="grid grid-cols-4 gap-2">
             <Button
               variant={selectedMedia.fontBold ? "default" : "outline"}
               size="sm"
@@ -8046,8 +8920,9 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   fontBold: !selectedMedia.fontBold,
                 })
               }
+              className="text-xs"
             >
-              <Bold className="w-4 h-4" />
+              <Bold className="w-3 h-3" />
             </Button>
             <Button
               variant={selectedMedia.fontItalic ? "default" : "outline"}
@@ -8057,16 +8932,89 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   fontItalic: !selectedMedia.fontItalic,
                 })
               }
+              className="text-xs"
             >
-              <Italic className="w-4 h-4" />
+              <Italic className="w-3 h-3" />
             </Button>
+            <Button
+              variant={selectedMedia.fontUnderline ? "default" : "outline"}
+              size="sm"
+              onClick={() =>
+                updateMediaItemProperties(selectedMedia.id, {
+                  fontUnderline: !selectedMedia.fontUnderline,
+                })
+              }
+              className="text-xs"
+            >
+              <span className="text-xs font-bold underline">U</span>
+            </Button>
+            <Button
+              variant={selectedMedia.fontStrikethrough ? "default" : "outline"}
+              size="sm"
+              onClick={() =>
+                updateMediaItemProperties(selectedMedia.id, {
+                  fontStrikethrough: !selectedMedia.fontStrikethrough,
+                })
+              }
+              className="text-xs"
+            >
+              <span className="text-xs font-bold line-through">S</span>
+            </Button>
+          </div>
+        </div>
+
+        {/* Text Alignment */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Text Alignment
+          </label>
+          <div className="grid grid-cols-3 gap-2">
+            {(["left", "center", "right"] as const).map((align) => (
+              <Button
+                key={align}
+                variant={selectedMedia.textAlignment === align ? "default" : "outline"}
+                size="sm"
+                onClick={() =>
+                  updateMediaItemProperties(selectedMedia.id, {
+                    textAlignment: align,
+                  })
+                }
+                className="text-xs capitalize"
+              >
+                {align}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        {/* Text Capitalization */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Text Capitalization
+          </label>
+          <div className="grid grid-cols-4 gap-2">
+            {(["AA", "Aa", "aa", "--"] as const).map((cap) => (
+              <Button
+                key={cap}
+                variant={selectedMedia.textCapitalization === cap ? "default" : "outline"}
+                size="sm"
+                onClick={() =>
+                  updateMediaItemProperties(selectedMedia.id, {
+                    textCapitalization: cap,
+                  })
+                }
+                className="text-xs"
+              >
+                {cap}
+              </Button>
+            ))}
           </div>
         </div>
 
         {/* Font Color */}
         <div>
           <label className="text-xs font-medium text-gray-700 block mb-1">
-            Font Color
+            Text Color
           </label>
           <Input
             type="color"
@@ -8078,6 +9026,65 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             }
             className="w-full h-8"
           />
+        </div>
+
+        {/* Text Opacity */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Text Opacity
+          </label>
+          <div className="flex items-center gap-2">
+            <Slider
+              value={[selectedMedia.textOpacity || 100]}
+              onValueChange={([value]) =>
+                updateMediaItemProperties(selectedMedia.id, { textOpacity: value })
+              }
+              min={0}
+              max={100}
+              step={1}
+              className="flex-1"
+            />
+            <span className="text-xs text-gray-500 min-w-[3rem] text-right">
+              {selectedMedia.textOpacity || 100}%
+            </span>
+          </div>
+        </div>
+
+        {/* Text Border */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Text Border
+          </label>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Input
+                type="color"
+                value={selectedMedia.textBorderColor || "#000000"}
+                onChange={(e) =>
+                  updateMediaItemProperties(selectedMedia.id, {
+                    textBorderColor: e.target.value,
+                  })
+                }
+                className="flex-1 h-8"
+                placeholder="Border Color"
+              />
+              <div className="flex items-center gap-2">
+                <Slider
+                  value={[selectedMedia.textBorderThickness || 0]}
+                  onValueChange={([value]) =>
+                    updateMediaItemProperties(selectedMedia.id, { textBorderThickness: value })
+                  }
+                  min={0}
+                  max={10}
+                  step={1}
+                  className="w-20"
+                />
+                <span className="text-xs text-gray-500 min-w-[2.5rem] text-right">
+                  {selectedMedia.textBorderThickness || 0}px
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Background Color */}
@@ -8116,6 +9123,29 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 Transparent
               </label>
             </div>
+          </div>
+        </div>
+
+        {/* Background Opacity */}
+        <div>
+          <label className="text-xs font-medium text-gray-700 block mb-1">
+            Background Opacity
+          </label>
+          <div className="flex items-center gap-2">
+            <Slider
+              value={[selectedMedia.backgroundOpacity || 100]}
+              onValueChange={([value]) =>
+                updateMediaItemProperties(selectedMedia.id, { backgroundOpacity: value })
+              }
+              min={0}
+              max={100}
+              step={1}
+              className="flex-1"
+              disabled={selectedMedia.backgroundTransparent}
+            />
+            <span className="text-xs text-gray-500 min-w-[3rem] text-right">
+              {selectedMedia.backgroundOpacity || 100}%
+            </span>
           </div>
         </div>
       </div>
@@ -8160,7 +9190,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           >
             <Plus className="w-4 h-4 " />
           </Button>
-          <div className="relative">
+          <div className="relative hidden">
             <Button
               size="sm"
               onClick={handleAddTranscriptClick}
@@ -8169,7 +9199,63 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               <Type className="w-4 h-4 " />
             </Button>
             {showTranscriptSelector && renderTranscriptSelector()}
-            {showStockMediaTranscriptSelector && renderStockMediaTranscriptSelector()}
+
+        
+        {/* Stock Media Generation Confirmation Dialog */}
+        {showStockMediaConfirmation && pendingStockMediaRequest && (
+          <div className="absolute top-full left-0 mt-1 p-4 bg-white border border-gray-200 rounded-lg shadow-lg z-50 min-w-96">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-red-600">
+                ⚠️ Confirm OpenAI API Call
+              </h3>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowStockMediaConfirmation(false)}
+                className="text-xs h-6 w-6 p-0"
+              >
+                <X className="w-3 h-3" />
+              </Button>
+            </div>
+            
+            <div className="mb-4">
+              <p className="text-sm text-gray-700 mb-2">
+                You are about to generate <strong>{pendingStockMediaRequest.length} AI images</strong> using OpenAI DALL-E.
+              </p>
+              <p className="text-xs text-gray-500 mb-3">
+                This will cost money. Each image costs approximately $0.04 USD.
+              </p>
+              
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {pendingStockMediaRequest.map((segment, index) => (
+                  <div key={segment.id} className="text-xs bg-gray-50 p-2 rounded">
+                    <span className="font-medium">Paragraph {segment.paragraphNumber || index + 1}:</span>
+                    <span className="text-gray-600 ml-2">
+                      {segment.text.substring(0, 60)}...
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            <div className="flex space-x-2">
+              <Button
+                size="sm"
+                onClick={confirmStockMediaGeneration}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                Generate {pendingStockMediaRequest.length} Images (${(pendingStockMediaRequest.length * 0.04).toFixed(2)})
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowStockMediaConfirmation(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
           </div>
           
           {/* Manual Auto-Transcript Trigger Button */}
@@ -8181,10 +9267,21 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 setAutoTranscriptGenerated(false);
                 setShowCompletionMessage(false);
               }
+              
+              // Check if transcripts already exist before proceeding
+              const existingTextLayers = layers.filter(layer => layer.type === "text");
+              const hasExistingTranscripts = existingTextLayers.some(layer => layer.items.length > 0);
+              
+              if (hasExistingTranscripts && !autoTranscriptGenerated) {
+                console.log("🎙️ MANUAL-TRANSCRIPT: Transcripts already exist, marking as completed");
+                setAutoTranscriptGenerated(true);
+                return;
+              }
+              
               autoGenerateTranscripts();
             }}
             disabled={isAutoGeneratingTranscripts}
-            className={`text-xs flex items-center justify-center ${
+            className={`text-xs flex items-center hidden justify-center ${
               autoTranscriptGenerated 
                 ? "bg-green-600 hover:bg-green-700" 
                 : "bg-orange-600 hover:bg-orange-700"
@@ -8199,13 +9296,15 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               <RefreshCw className="w-4 h-4" />
             )}
           </Button>
-          <Button
+
+          {/* <Button
             size="sm"
-            onClick={handleFetchStockMedia}
-            className="text-xs bg-purple-600 hover:bg-purple-700 flex items-center justify-center"
+            onClick={() => handleStoryBasedStockMediaGeneration()}
+            className="text-xs bg-blue-600 hidden hover:bg-blue-700 flex items-center justify-center"
+            title="Generate images based on story content and video duration"
           >
-            <ImageIcon className="w-4 h-4 " />
-          </Button>
+            Story
+          </Button> */}
         </div>
       </CardHeader>
 
@@ -8223,6 +9322,14 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             const filteredItems = mediaItems.filter(
               (item) => item.type !== "text"
             );
+
+            // Debug logging for OpenAI images
+            const openaiImages = filteredItems.filter(item => item.source === 'openai-dalle');
+            if (openaiImages.length > 0) {
+              console.log(`🖼️ MEDIA PANEL: Found ${openaiImages.length} OpenAI images:`, 
+                openaiImages.map(img => ({ id: img.id, name: img.name, type: img.type, source: img.source }))
+              );
+            }
 
             const videoItems = filteredItems.filter(
               (item) => item.type === "video"
@@ -8393,7 +9500,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
   };
   // Render timeline section
   const renderTimelineSection = () => (
-    <div className="h-[130px] mt-[90px] bg-white border-t border-gray-200 flex select-none">
+    <div className="h-[150px] mt-[67px] bg-white border-t border-gray-200 flex select-none">
       <style>{`
         .slider::-webkit-slider-thumb {
           appearance: none;
@@ -8656,44 +9763,55 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               }
             }}
           >
-            {layers.map((layer) => (
-              <div
-                key={layer.id}
-                className={`h-8 min-h-[32px] border-b border-gray-200 relative bg-white group
-                  ${!layer.visible && "opacity-50"} 
-                  ${selectedLayerId === layer.id ? "bg-blue-50" : ""}
-                  ${layer.locked ? "cursor-not-allowed" : ""}
-                  ${
-                    timelineDropTarget?.layerId === layer.id
-                      ? "bg-green-100 ring-2 ring-green-300"
-                      : ""
-                  }
-                  transition-all duration-150`}
-                onClick={() => setSelectedLayerId(layer.id)}
-                onDragOver={(e) => handleTimelineDragOver(e, layer.id)}
-                onDragLeave={handleTimelineDragLeave}
-                onDrop={(e) => handleTimelineDrop(e, layer.id)}
-              >
-                {layer.items.map((item) => renderTimelineItem(item))}
+            {layers.map((layer) => {
+              // Debug logging for stock media layer
+              if (layer.id === 'stocks-layer') {
+                console.log(`🎬 TIMELINE RENDER: Rendering stocks layer with ${layer.items?.length || 0} items:`, 
+                  layer.items?.map(item => ({ id: item.id, mediaId: item.mediaId, startTime: item.startTime }))
+                );
+              }
+              
+              return (
+                <div
+                  key={layer.id}
+                  className={`h-8 min-h-[32px] border-b border-gray-200 relative bg-white group
+                    ${!layer.visible && "opacity-50"} 
+                    ${selectedLayerId === layer.id ? "bg-blue-50" : ""}
+                    ${layer.locked ? "cursor-not-allowed" : ""}
+                    ${
+                      timelineDropTarget?.layerId === layer.id
+                        ? "bg-green-100 ring-2 ring-green-300"
+                        : ""
+                    }
+                    transition-all duration-150`}
+                  onClick={() => setSelectedLayerId(layer.id)}
+                  onDragOver={(e) => handleTimelineDragOver(e, layer.id)}
+                  onDragLeave={handleTimelineDragLeave}
+                  onDrop={(e) => handleTimelineDrop(e, layer.id)}
+                >
+                  {layer.items.map((item) => renderTimelineItem(item))}
 
-                {/* Drop indicator */}
-                {timelineDropTarget?.layerId === layer.id && (
-                  <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-green-500 z-20 pointer-events-none"
-                    style={{
-                      left: `${(timelineDropTarget.time / totalDuration) * 100}%`,
-                    }}
-                  >
-                    <div className="absolute -top-1 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-2 border-r-2 border-b-3 border-transparent border-b-green-500" />
-                  </div>
-                )}
-              </div>
-            ))}
+                  {/* Drop indicator */}
+                  {timelineDropTarget?.layerId === layer.id && (
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-green-500 z-20 pointer-events-none"
+                      style={{
+                        left: `${(timelineDropTarget.time / totalDuration) * 100}%`,
+                      }}
+                    >
+                      <div className="absolute -top-1 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-2 border-r-2 border-b-3 border-transparent border-b-green-500" />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
     </div>
   );
+
+
 
   return (
     <div className={`h-screen bg-gray-50 flex flex-col ${className}`}>
@@ -8709,26 +9827,33 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
           </div>
         </div>
       )}
+
+      {/* Automatic Image Generation Progress Indicator */}
       {isAutoGeneratingStockMedia && (
         <div className="fixed top-16 right-4 z-50 bg-purple-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-md">
           <div className="flex items-center space-x-3">
             <Loader2 className="w-5 h-5 animate-spin" />
             <div className="flex-1">
-              <h4 className="font-medium text-sm">Auto-Generating Stock Media</h4>
+              <h4 className="font-medium text-sm">Auto-Generating Images</h4>
               <p className="text-xs text-purple-100 mt-1">{autoStockMediaProgress}</p>
             </div>
           </div>
         </div>
       )}
       
-      {/* Automatic Transcript Generation Completion Message */}
+      {/* Automatic Generation Completion Message */}
       {showCompletionMessage && (
         <div className="fixed top-4 right-4 z-50 bg-green-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-md">
           <div className="flex items-center space-x-3">
             <CheckCircle className="w-5 h-5" />
             <div className="flex-1">
-              <h4 className="font-medium text-sm">Transcripts Generated!</h4>
-              <p className="text-xs text-green-100 mt-1">All voiceover transcripts have been automatically generated.</p>
+              <h4 className="font-medium text-sm">Auto-Generation Complete!</h4>
+              <p className="text-xs text-green-100 mt-1">
+                {autoStockMediaGenerated 
+                  ? "Transcripts and images have been automatically generated." 
+                  : "All voiceover transcripts have been automatically generated."
+                }
+              </p>
             </div>
           </div>
         </div>
@@ -8760,9 +9885,15 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             <CheckCircle className="w-4 h-4 mr-2" />
             Save & Finish
           </Button>
+
           {hasRenderFailed ? (
             <Button
-              onClick={onRetryRender}
+              onClick={() => {
+                // Save the current video assets before retrying render
+                saveVideoAssets();
+                // Then call the retry render function
+                onRetryRender?.();
+              }}
               className="bg-orange-600 hover:bg-orange-700 text-white"
             >
               <RefreshCw className="w-4 h-4 mr-2" />
@@ -8770,7 +9901,12 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
             </Button>
           ) : (
             <Button
-              onClick={onRender}
+              onClick={() => {
+                // Save the current video assets before rendering
+                saveVideoAssets();
+                // Then call the render function
+                onRender?.();
+              }}
               className="bg-green-600 hover:bg-green-700 text-white"
             >
               <VideoIcon className="w-4 h-4 mr-2" />
@@ -8783,15 +9919,15 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
       <div className="flex-1 flex max-h-[calc(100vh-70px-220px)]">
         {renderMediaPanel()}
 
-        <div className="flex-1 relative flex flex-col bg-gray-900 min-h-[500px]">
+        <div className="flex-1 relative flex flex-col bg-gray-900 h-[480px]">
           <div className="flex-1 flex items-center justify-center p-4">
             <Card
-              className={`w-full max-w-4xl ${getVideoAspectRatio()} bg-black border-gray-600 overflow-hidden rounded-none`}
+              className={`w-full max-w-4xl ${getVideoAspectRatio()} bg-black border-gray-600 overflow-hidden max-h-[400px] rounded-none`}
             >
-              <CardContent className="p-0 h-[330px] w-full flex items-center justify-center bg-black">
+              <CardContent className="p-0 min-h-[330px] w-full flex items-center justify-center bg-black">
                 <canvas
                   ref={previewCanvasRef}
-                  className="max-w-full max-h-full w-full h-full object-contain"
+                  className="max-w-full max-h-[370px] w-full object-contain"
                   style={{
                     backgroundColor: "black",
                     cursor: canvasCursor,
