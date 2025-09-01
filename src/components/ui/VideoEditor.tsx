@@ -2933,7 +2933,44 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     videoDuration?: number;
   }> | null>(null);
 
+  // General transcript settings state
+  const [generalTranscriptSettings, setGeneralTranscriptSettings] = useState({
+    fontFamily: "Arial",
+    fontSize: 24,
+    fontBold: false,
+    fontItalic: false,
+    fontColor: "#ffffff",
+    backgroundColor: "#000000",
+    backgroundTransparent: false,
+    textAlignment: "center" as "left" | "center" | "right"
+  });
+
   const handleAddTranscriptClick = () => setShowTranscriptSelector(true);
+
+  // Function to update general transcript settings
+  const updateGeneralTranscriptSettings = (updates: Partial<typeof generalTranscriptSettings>) => {
+    setGeneralTranscriptSettings(prev => ({ ...prev, ...updates }));
+  };
+
+  // Function to apply general settings to all transcript text items
+  const applyGeneralSettingsToAllTranscripts = () => {
+    const textMediaItems = mediaItems.filter(item => item.type === 'text');
+    
+    textMediaItems.forEach(item => {
+      updateMediaItemProperties(item.id, {
+        fontFamily: generalTranscriptSettings.fontFamily,
+        fontSize: generalTranscriptSettings.fontSize,
+        fontBold: generalTranscriptSettings.fontBold,
+        fontItalic: generalTranscriptSettings.fontItalic,
+        fontColor: generalTranscriptSettings.fontColor,
+        backgroundColor: generalTranscriptSettings.backgroundColor,
+        backgroundTransparent: generalTranscriptSettings.backgroundTransparent,
+        textAlignment: generalTranscriptSettings.textAlignment
+      });
+    });
+    
+    console.log(`Applied general transcript settings to ${textMediaItems.length} text items`);
+  };
 
   // Function to sync media item properties from timeline item geometry (for canvas interactions)
   const syncMediaItemFromGeometry = (timelineItemId: string) => {
@@ -8720,10 +8757,317 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
 
     if (!selectedMedia) {
       return (
-        <div className="flex-1 flex items-center justify-center text-gray-500">
-          <div className="text-center">
+        <div className="flex-1 space-y-6">
+          <div className="text-center mb-4">
             <Settings className="w-8 h-8 mx-auto mb-2 opacity-50" />
-            <p>Select a timeline item to edit properties</p>
+            <p className="text-gray-500">Select a timeline item to edit properties</p>
+          </div>
+          
+          {/* General Transcript Settings */}
+          <div className="space-y-4">
+            <h3 className="font-semibold text-gray-900 flex items-center">
+              <Type className="w-4 h-4 mr-2" />
+              General Transcript Settings
+            </h3>
+            <p className="text-sm text-gray-600">
+              These settings will apply to all transcript text items in your video.
+            </p>
+            
+            {/* Font Family */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Font Family
+              </label>
+              <select
+                value={generalTranscriptSettings.fontFamily || "Arial"}
+                onChange={(e) => updateGeneralTranscriptSettings({ fontFamily: e.target.value })}
+                className="w-full text-xs border border-gray-300 rounded px-2 py-1"
+              >
+                {systemFonts.map((font) => (
+                  <option key={font} value={font} style={{ fontFamily: font }}>
+                    {font}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Font Size */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Font Size
+              </label>
+              <div className="flex items-center gap-2">
+                <Slider
+                  value={[generalTranscriptSettings.fontSize || 24]}
+                  onValueChange={([value]) => updateGeneralTranscriptSettings({ fontSize: value })}
+                  min={8}
+                  max={72}
+                  step={1}
+                  className="flex-1"
+                />
+                <span className="text-xs text-gray-500 min-w-[2rem] text-right">
+                  {generalTranscriptSettings.fontSize || 24}px
+                </span>
+              </div>
+            </div>
+
+            {/* Font Style */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-2">
+                Default Font Style
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant={generalTranscriptSettings.fontBold ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateGeneralTranscriptSettings({ fontBold: !generalTranscriptSettings.fontBold })}
+                  className="text-xs"
+                >
+                  <Bold className="w-3 h-3" />
+                </Button>
+                <Button
+                  variant={generalTranscriptSettings.fontItalic ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateGeneralTranscriptSettings({ fontItalic: !generalTranscriptSettings.fontItalic })}
+                  className="text-xs"
+                >
+                  <Italic className="w-3 h-3" />
+                </Button>
+              </div>
+            </div>
+
+            {/* Text Color */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Text Color
+              </label>
+              <Input
+                type="color"
+                value={generalTranscriptSettings.fontColor || "#ffffff"}
+                onChange={(e) => updateGeneralTranscriptSettings({ fontColor: e.target.value })}
+                className="w-full h-8"
+              />
+            </div>
+
+            {/* Background Color */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Background Color
+              </label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="color"
+                  value={generalTranscriptSettings.backgroundColor || "#000000"}
+                  onChange={(e) => updateGeneralTranscriptSettings({ backgroundColor: e.target.value })}
+                  className="flex-1 h-8"
+                  disabled={generalTranscriptSettings.backgroundTransparent}
+                />
+                <div className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    id="generalBackgroundTransparent"
+                    checked={generalTranscriptSettings.backgroundTransparent || false}
+                    onChange={(e) => updateGeneralTranscriptSettings({ backgroundTransparent: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <label
+                    htmlFor="generalBackgroundTransparent"
+                    className="text-xs text-gray-700 cursor-pointer"
+                  >
+                    Transparent
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* Text Alignment */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Text Alignment
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {(["left", "center", "right"] as const).map((align) => (
+                  <Button
+                    key={align}
+                    variant={generalTranscriptSettings.textAlignment === align ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => updateGeneralTranscriptSettings({ textAlignment: align })}
+                    className="text-xs capitalize"
+                  >
+                    {align}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            {/* Apply to All Transcripts Button */}
+            <div className="pt-2">
+              <Button
+                onClick={applyGeneralSettingsToAllTranscripts}
+                className="w-full text-xs bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                Apply to All Transcripts
+              </Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (!selectedMedia) {
+      return (
+        <div className="flex-1 space-y-6">
+          <div className="text-center mb-4">
+            <Settings className="w-8 h-8 mx-auto mb-2 opacity-50" />
+            <p className="text-gray-500">Select a timeline item to edit properties</p>
+          </div>
+          
+          {/* General Transcript Settings */}
+          <div className="space-y-4">
+            <h3 className="font-semibold text-gray-900 flex items-center">
+              <Type className="w-4 h-4 mr-2" />
+              General Transcript Settings
+            </h3>
+            <p className="text-sm text-gray-600">
+              These settings will apply to all transcript text items in your video.
+            </p>
+            
+            {/* Font Family */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Font Family
+              </label>
+              <select
+                value={generalTranscriptSettings.fontFamily || "Arial"}
+                onChange={(e) => updateGeneralTranscriptSettings({ fontFamily: e.target.value })}
+                className="w-full text-xs border border-gray-300 rounded px-2 py-1"
+              >
+                {systemFonts.map((font) => (
+                  <option key={font} value={font} style={{ fontFamily: font }}>
+                    {font}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Font Size */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Font Size
+              </label>
+              <div className="flex items-center gap-2">
+                <Slider
+                  value={[generalTranscriptSettings.fontSize || 24]}
+                  onValueChange={([value]) => updateGeneralTranscriptSettings({ fontSize: value })}
+                  min={8}
+                  max={72}
+                  step={1}
+                  className="flex-1"
+                />
+                <span className="text-xs text-gray-500 min-w-[2rem] text-right">
+                  {generalTranscriptSettings.fontSize || 24}px
+                </span>
+              </div>
+            </div>
+
+            {/* Font Style */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-2">
+                Default Font Style
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant={generalTranscriptSettings.fontBold ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateGeneralTranscriptSettings({ fontBold: !generalTranscriptSettings.fontBold })}
+                  className="text-xs"
+                >
+                  <Bold className="w-3 h-3" />
+                </Button>
+                <Button
+                  variant={generalTranscriptSettings.fontItalic ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateGeneralTranscriptSettings({ fontItalic: !generalTranscriptSettings.fontItalic })}
+                  className="text-xs"
+                >
+                  <Italic className="w-3 h-3" />
+                </Button>
+              </div>
+            </div>
+
+            {/* Text Color */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Text Color
+              </label>
+              <Input
+                type="color"
+                value={generalTranscriptSettings.fontColor || "#ffffff"}
+                onChange={(e) => updateGeneralTranscriptSettings({ fontColor: e.target.value })}
+                className="w-full h-8"
+              />
+            </div>
+
+            {/* Background Color */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Background Color
+              </label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="color"
+                  value={generalTranscriptSettings.backgroundColor || "#000000"}
+                  onChange={(e) => updateGeneralTranscriptSettings({ backgroundColor: e.target.value })}
+                  className="flex-1 h-8"
+                  disabled={generalTranscriptSettings.backgroundTransparent}
+                />
+                <div className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    id="generalBackgroundTransparent"
+                    checked={generalTranscriptSettings.backgroundTransparent || false}
+                    onChange={(e) => updateGeneralTranscriptSettings({ backgroundTransparent: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <label
+                    htmlFor="generalBackgroundTransparent"
+                    className="text-xs text-gray-700 cursor-pointer"
+                  >
+                    Transparent
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* Text Alignment */}
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">
+                Default Text Alignment
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {(["left", "center", "right"] as const).map((align) => (
+                  <Button
+                    key={align}
+                    variant={generalTranscriptSettings.textAlignment === align ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => updateGeneralTranscriptSettings({ textAlignment: align })}
+                    className="text-xs capitalize"
+                  >
+                    {align}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            {/* Apply to All Transcripts Button */}
+            <div className="pt-2">
+              <Button
+                onClick={applyGeneralSettingsToAllTranscripts}
+                className="w-full text-xs bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                Apply to All Transcripts
+              </Button>
+            </div>
           </div>
         </div>
       );
@@ -9183,11 +9527,27 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
     return (
       <div className="flex-1 space-y-6">
         <div className="space-y-2">
-          <h3 className="font-semibold text-gray-900">Selected Item</h3>
-          <p className="text-sm text-gray-600">{selectedMedia.name}</p>
-          <p className="text-xs text-gray-500 capitalize">
-            {selectedMedia.type} • {selectedMedia.duration.toFixed(1)}s
-          </p>
+          <div>
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Selected Item</h3>
+              {selectedMedia.type === "text" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setSelectedTimelineItem(null)}
+                  className="text-xs flex items-center gap-1 px-2 py-1 h-7"
+                  title="Back to General Settings"
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  Back
+                </Button>
+              )}
+            </div>
+            <p className="text-sm text-gray-600">{selectedMedia.name}</p>
+            <p className="text-xs text-gray-500 capitalize">
+              {selectedMedia.type} • {selectedMedia.duration.toFixed(1)}s
+            </p>
+          </div>
         </div>
 
         {/* Audio controls for audio and video items */}
