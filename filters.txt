@@ -1,0 +1,22 @@
+# Sample FFmpeg Filter Complex Script
+# This file contains the filter complex commands that would normally be passed as a long string
+# Using -filter_complex_script avoids command line length limitations
+
+# Create background video
+color=black:size=1920x1080:duration=30:rate=30 [bg]
+
+# Process image layer 0, item 0
+[0:v] scale=400:300:force_original_aspect_ratio=decrease [item_0_0]
+[bg][item_0_0] overlay=100:100:enable='between(t,0,5)' [overlay_0]
+
+# Process video layer 1, item 0
+[1:v] trim=duration=10, setpts=PTS-STARTPTS, scale=600:400:force_original_aspect_ratio=decrease [item_1_0]
+[overlay_0][item_1_0] overlay=200:200:enable='between(t,2,12)' [overlay_1]
+
+# Process text layer 2, item 0
+drawbox=x=300:y=300:w=400:h=200:color=#000000:t=fill:enable='between(t,1,8)' [bg_2]
+[overlay_1] drawtext=text='Sample Text':fontsize=48:fontcolor=#ffffff:fontfile=C:/Windows/Fonts/arial.ttf:x=300+(400-text_w)/2:y=300+(200-text_h)/2:enable='between(t,1,8)' [text_2]
+
+# Process audio
+[2:a] atrim=duration=15, asetpts=PTS-STARTPTS, volume=0.8 [audio_0_0]
+[audio_0_0] amix=inputs=1:duration=longest [audio_final]

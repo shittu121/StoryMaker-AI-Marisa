@@ -8,6 +8,7 @@ import { motion } from "framer-motion";
 interface RenderScreenProps {
   onBackToEditor: () => void;
   onSaveComplete: () => void;
+  videoAssets?: any; // Video data from VideoEditor
 }
 
 type RenderStatus = "rendering" | "complete" | "error";
@@ -15,12 +16,60 @@ type RenderStatus = "rendering" | "complete" | "error";
 export const RenderScreen: React.FC<RenderScreenProps> = ({
   onBackToEditor,
   onSaveComplete,
+  videoAssets,
 }) => {
   const [status, setStatus] = useState<RenderStatus>("rendering");
   const [progress, setProgress] = useState(0);
   const [renderedFilePath, setRenderedFilePath] = useState<string | null>(null);
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+
+  useEffect(() => {
+    // Start the render process when component mounts
+    if (videoAssets) {
+      console.log("Starting render process with video assets:", videoAssets);
+      console.log("Video assets layers:", videoAssets.layers);
+      console.log("Video assets mediaLibrary:", videoAssets.mediaLibrary);
+      console.log("Video assets timeline:", videoAssets.timeline);
+      
+      // Ensure the video assets have the required structure
+      const processedVideoAssets = {
+        ...videoAssets,
+        layers: videoAssets.layers || [],
+        mediaLibrary: videoAssets.mediaLibrary || [],
+        timeline: videoAssets.timeline || { totalDuration: 30 },
+        editorSettings: videoAssets.editorSettings || { videoStyle: 'landscape' }
+      };
+      
+      // Test if the data can be serialized (to catch circular references)
+      try {
+        JSON.stringify(processedVideoAssets);
+        console.log("Video assets can be serialized successfully");
+      } catch (serializeError) {
+        console.error("Video assets cannot be serialized:", serializeError);
+        setStatus("error");
+        setErrorMessage("Video data contains non-serializable content");
+        return;
+      }
+      
+      console.log("Processed video assets:", processedVideoAssets);
+      
+      try {
+        console.log("Calling electron.startRender with processed video assets...");
+        // Start the render process with the processed video assets
+        (window as any).electron.startRender(processedVideoAssets);
+        console.log("electron.startRender called successfully");
+      } catch (error) {
+        console.error("Failed to start render process:", error);
+        setStatus("error");
+        setErrorMessage("Failed to start render process: " + (error as Error).message);
+      }
+    } else {
+      console.error("No video assets provided to RenderScreen");
+      setStatus("error");
+      setErrorMessage("No video data available for rendering");
+    }
+  }, [videoAssets]);
 
   useEffect(() => {
     // Listen for progress updates from the main process
@@ -30,12 +79,14 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
         progress,
         error,
         filePath,
-      }: { progress: number; error?: string; filePath?: string }
+        message,
+      }: { progress: number; error?: string; filePath?: string; message?: string }
     ) => {
       console.log("Render progress update received:", {
         progress,
         error,
         filePath,
+        message,
       });
       if (error) {
         setStatus("error");
@@ -47,7 +98,7 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
         
         // Load the video file and convert to blob URL for preview
         try {
-          const result = await window.electron.loadRenderedVideo(filePath);
+          const result = await (window as any).electron.loadRenderedVideo(filePath);
           if (result.success) {
             const uint8Array = new Uint8Array(result.data);
             const blob = new Blob([uint8Array], { type: 'video/mp4' });
@@ -64,10 +115,10 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
       }
     };
 
-    window.electron.onRenderProgress(handleProgress);
+    (window as any).electron.onRenderProgress(handleProgress);
 
     return () => {
-      window.electron.removeRenderProgressListener(handleProgress);
+      (window as any).electron.removeRenderProgressListener(handleProgress);
     };
   }, []);
 
@@ -82,11 +133,12 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
 
   const handleSaveVideo = async () => {
     if (renderedFilePath) {
-      const success = await window.electron.saveRenderedVideo(renderedFilePath);
+      const success = await (window as any).electron.saveRenderedVideo(renderedFilePath);
       if (success) {
         onSaveComplete();
       } else {
         // Handle failed save, e.g., show a toast
+        setErrorMessage("Failed to save video to computer");
       }
     }
   };
@@ -105,6 +157,7 @@ export const RenderScreen: React.FC<RenderScreenProps> = ({
               <Progress value={progress} className="w-full mb-3" />
               <p className="text-base font-mono text-blue-600">{progress.toFixed(1)}% Complete</p>
             </div>
+            
             <div className="mt-6 text-sm text-gray-400">
               <p>Processing timeline, media files, and text overlays...</p>
             </div>

@@ -33,7 +33,6 @@ import {
   Square,
   RefreshCw,
   RotateCcw,
-  Image as ImageIcon,
 } from "lucide-react";
 
 interface MediaItem {
@@ -1649,32 +1648,52 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   break;
               }
 
-              // Word wrap to fill the exact calculated width
+              // Process text with proper line breaks and word wrapping
               const maxWidth = width * 0.9; // Use 90% to prevent edge overflow
-              const words = displayText.split(" ");
               const lines: string[] = [];
-              let currentLine = words[0] || "";
-
-              for (let i = 1; i < words.length; i++) {
-                const word = words[i];
-                const testLine = currentLine + " " + word;
-                const metrics = ctx.measureText(testLine);
-
-                if (metrics.width > maxWidth && currentLine.length > 0) {
-                  lines.push(currentLine);
-                  currentLine = word;
-                } else {
-                  currentLine = testLine;
+              
+              // First, split by actual newlines to respect line breaks
+              const paragraphs = displayText.split('\n');
+              
+              paragraphs.forEach(paragraph => {
+                if (paragraph.trim() === '') {
+                  // Empty paragraph - add a blank line
+                  lines.push('');
+                  return;
                 }
-              }
-              if (currentLine.length > 0) {
-                lines.push(currentLine);
-              }
+                
+                // Word wrap each paragraph
+                const words = paragraph.split(" ");
+                let currentLine = words[0] || "";
+
+                for (let i = 1; i < words.length; i++) {
+                  const word = words[i];
+                  const testLine = currentLine + " " + word;
+                  const metrics = ctx.measureText(testLine);
+
+                  if (metrics.width > maxWidth && currentLine.length > 0) {
+                    lines.push(currentLine);
+                    currentLine = word;
+                  } else {
+                    currentLine = testLine;
+                  }
+                }
+                if (currentLine.length > 0) {
+                  lines.push(currentLine);
+                }
+              });
+              
+              // Debug: Log the processed lines
+              console.log(`[PREVIEW TEXT] ${mediaItem.id}: Original text: "${displayText}"`);
+              console.log(`[PREVIEW TEXT] ${mediaItem.id}: Processed into ${lines.length} lines:`, lines);
 
               // Position text to fill the entire area
               let actualLineHeight;
               let startY;
 
+              // Filter out empty lines for height calculation but keep them for spacing
+              const nonEmptyLines = lines.filter(line => line.trim() !== '');
+              
               if (lines.length === 1) {
                 actualLineHeight = height;
                 startY = height / 2;
@@ -1684,9 +1703,17 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                 const topMargin = actualLineHeight / 2;
                 startY = topMargin;
               }
+              
+              console.log(`[PREVIEW TEXT] ${mediaItem.id}: Line positioning - total lines: ${lines.length}, non-empty: ${nonEmptyLines.length}, line height: ${actualLineHeight}px, start Y: ${startY}px`);
 
               lines.forEach((line, index) => {
                 const lineY = startY + index * actualLineHeight;
+
+                // Skip rendering empty lines but still maintain spacing
+                if (line.trim() === '') {
+                  console.log(`[PREVIEW TEXT] ${mediaItem.id}: Skipping empty line at index ${index}`);
+                  return;
+                }
 
                 // Calculate optimal font size to fit within bounds
                 let optimalFontSize = fontSize;
@@ -1708,6 +1735,8 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
                   let newFontString = `${fontStyle} ${fontWeight} ${optimalFontSize}px ${fontFamily}`;
                   ctx.font = newFontString;
                 }
+
+                console.log(`[PREVIEW TEXT] ${mediaItem.id}: Rendering line ${index}: "${line}" at Y=${lineY}px with font size=${optimalFontSize}px`);
 
                 // Draw text with border and fill
                 if (mediaItem.textBorderThickness && mediaItem.textBorderThickness > 0) {
@@ -9281,7 +9310,7 @@ const VideoEditor: React.FC<VideoEditorProps> = ({
               autoGenerateTranscripts();
             }}
             disabled={isAutoGeneratingTranscripts}
-            className={`text-xs flex items-center hidden justify-center ${
+            className={`text-xs items-center hidden justify-center ${
               autoTranscriptGenerated 
                 ? "bg-green-600 hover:bg-green-700" 
                 : "bg-orange-600 hover:bg-orange-700"

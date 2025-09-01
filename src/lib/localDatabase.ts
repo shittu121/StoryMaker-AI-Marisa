@@ -189,9 +189,12 @@ class LocalDatabase {
         timestampData: true,
       });
 
-      // Only index on createdAt and status
+      // Create indexes for better performance and duplicate prevention
       this.db.ensureIndex({ fieldName: "createdAt" });
       this.db.ensureIndex({ fieldName: "status" });
+      this.db.ensureIndex({ fieldName: "title" });
+      this.db.ensureIndex({ fieldName: "content" });
+      this.db.ensureIndex({ fieldName: "updatedAt" });
 
       console.log("Database initialized successfully");
     } catch (err) {
@@ -208,6 +211,28 @@ class LocalDatabase {
     }
 
     return new Promise((resolve, reject) => {
+      // Check for existing story with same title and content to prevent duplicates
+      const existingStoryQuery = {
+        title: story.title,
+        content: story.content,
+        // Only check for exact matches in the last 5 minutes to avoid false positives
+        createdAt: { $gte: new Date(Date.now() - 5 * 60 * 1000).toISOString() }
+      };
+
+      this.db!.findOne(existingStoryQuery, (findErr, existingStory) => {
+        if (findErr) {
+          reject(findErr);
+          return;
+        }
+
+        // If we found an existing story with the same title and content, return it instead of creating a duplicate
+        if (existingStory) {
+          console.log("🔄 Duplicate story detected, returning existing story:", existingStory._id);
+          resolve(existingStory);
+          return;
+        }
+
+        // No duplicate found, proceed with creating new story
       const newStory: LocalStory = {
         _id: generateId(), // Generate unique ID
         title: story.title,
@@ -245,8 +270,10 @@ class LocalDatabase {
         if (err) {
           reject(err);
         } else {
+            console.log("✅ New story created successfully:", insertedStory._id);
           resolve(insertedStory);
         }
+        });
       });
     });
   }
@@ -409,6 +436,109 @@ class LocalDatabase {
         } else {
           resolve(count);
         }
+      });
+    });
+  }
+
+  // Clean up duplicate stories
+  async cleanupDuplicates(): Promise<{ removed: number; kept: number }> {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db!.find({}, (err: any, allStories: LocalStory[]) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        const duplicates = new Map<string, LocalStory[]>();
+        const toRemove: string[] = [];
+
+        // Group stories by title and content
+        allStories.forEach((story: LocalStory) => {
+          const key = `${story.title}|${story.content}`;
+          if (!duplicates.has(key)) {
+            duplicates.set(key, []);
+          }
+          duplicates.get(key)!.push(story);
+        });
+
+        // Find duplicates and mark older ones for removal
+        duplicates.forEach((stories: LocalStory[]) => {
+          if (stories.length > 1) {
+            // Sort by creation date, keep the newest one
+            stories.sort((a: LocalStory, b: LocalStory) => 
+              new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime()
+            );
+            
+            // Mark all but the newest for removal
+            for (let i = 1; i < stories.length; i++) {
+              toRemove.push(stories[i]._id!);
+            }
+          }
+        });
+
+        if (toRemove.length === 0) {
+          resolve({ removed: 0, kept: allStories.length });
+          return;
+        }
+
+        // Remove duplicates
+        this.db!.remove({ _id: { $in: toRemove } }, { multi: true }, (removeErr: any, numRemoved: number) => {
+          if (removeErr) {
+            reject(removeErr);
+          } else {
+            console.log(`🧹 Cleaned up ${numRemoved} duplicate stories`);
+            resolve({ removed: numRemoved, kept: allStories.length - numRemoved });
+          }
+        });
+      });
+    });
+  }
+
+  // Get database statistics
+  async getDatabaseStats(): Promise<{
+    totalStories: number;
+    drafts: number;
+    completed: number;
+    generating: number;
+    failed: number;
+    databaseSize: string;
+  }> {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db!.find({}, (err: any, allStories: LocalStory[]) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        const stats = {
+          totalStories: allStories.length,
+          drafts: allStories.filter((s: LocalStory) => s.status === 'draft').length,
+          completed: allStories.filter((s: LocalStory) => s.status === 'completed').length,
+          generating: allStories.filter((s: LocalStory) => s.status === 'generating').length,
+          failed: allStories.filter((s: LocalStory) => s.status === 'failed').length,
+          databaseSize: 'Unknown'
+        };
+
+        // Try to get database file size
+        try {
+          if (fs.existsSync(this.dbPath)) {
+            const fileStats = fs.statSync(this.dbPath);
+            const sizeInMB = (fileStats.size / (1024 * 1024)).toFixed(2);
+            stats.databaseSize = `${sizeInMB} MB`;
+          }
+        } catch (error) {
+          console.warn('Could not get database file size:', error);
+        }
+
+        resolve(stats);
       });
     });
   }

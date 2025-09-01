@@ -14,7 +14,7 @@ import * as fs from "fs/promises";
 import { existsSync, mkdirSync, copyFileSync } from "fs"; // Import sync methods
 import { spawn } from 'child_process';
 import ffmpeg from 'ffmpeg-static';
-import { platform } from 'os';
+import { platform, tmpdir } from 'os';
 
 // Helper function to wrap text for FFmpeg drawtext filter
 function wrapTextForFFmpeg(text: string, maxCharsPerLine: number): string {
@@ -259,6 +259,14 @@ ipcMain.handle("storyDB:updateStory", async (_event, id, updates) => {
 });
 ipcMain.handle("storyDB:deleteStory", async (_event, id) => {
   return localDatabase.deleteStory(id);
+});
+
+ipcMain.handle("storyDB:cleanupDuplicates", async () => {
+  return localDatabase.cleanupDuplicates();
+});
+
+ipcMain.handle("storyDB:getDatabaseStats", async () => {
+  return localDatabase.getDatabaseStats();
 });
 
 // IPC handlers for Audio File Operations
@@ -546,14 +554,43 @@ if (!existsSync(tempDir)) {
 }
 
 // Handle video rendering
-ipcMain.on('start-render', (event, videoAssets) => {
-  console.log('[FFMPEG] Received start-render event.');
-  const outputFileName = `render_${Date.now()}.mp4`;
+ipcMain.on('start-render', async (event, videoAssets) => {
+  try {
+    console.log('[FFMPEG] Received start-render event.');
+    console.log('[FFMPEG] Video assets received:', {
+      hasVideoAssets: !!videoAssets,
+      hasLayers: !!videoAssets?.layers,
+      layersCount: videoAssets?.layers?.length || 0,
+      hasMediaLibrary: !!videoAssets?.mediaLibrary,
+      mediaLibraryCount: videoAssets?.mediaLibrary?.length || 0,
+      hasTimeline: !!videoAssets?.timeline,
+      totalDuration: videoAssets?.timeline?.totalDuration || 0
+    });
+    
+        // Send initial progress to confirm we received the data
+    console.log('[FFMPEG] Sending initial progress message...');
+    event.sender.send('render-progress', { progress: 0, message: 'Starting render process...' });
+    console.log('[FFMPEG] Initial progress message sent');
+    
+    const outputFileName = `render_${Date.now()}.mp4`;
   const outputPath = join(tempDir, outputFileName);
 
   // --- FFMPEG Command Generation with Timeline Support ---
   const inputs: string[] = [];
   const filterComplex: string[] = [];
+  let filterScriptPath: string | undefined;
+  
+  // Cleanup function for filter script file
+  const cleanupFilterScript = async () => {
+    if (filterScriptPath) {
+      try {
+        await fs.unlink(filterScriptPath);
+        console.log(`[FFMPEG] Cleaned up filter script file: ${filterScriptPath}`);
+      } catch (cleanupError) {
+        console.warn(`[FFMPEG] Failed to clean up filter script file: ${cleanupError}`);
+      }
+    }
+  };
 
   // Enhanced types for timeline-based rendering - match video editor exactly
   interface MediaItem {
@@ -580,6 +617,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
     fontColor?: string;
     backgroundColor?: string;
     backgroundTransparent?: boolean;
+    textAlignment?: "left" | "center" | "right";
   }
 
   interface GeometricInfo {
@@ -615,6 +653,28 @@ ipcMain.on('start-render', (event, videoAssets) => {
   const videoStyle = videoAssets.editorSettings?.videoStyle || 'landscape';
 
   console.log(`[FFMPEG] Timeline: ${totalDuration}s, Layers: ${layers.length}, Media: ${mediaLibrary.length}`);
+  console.log(`[FFMPEG] Layers details:`, layers.map(layer => ({
+    id: layer.id,
+    name: layer.name,
+    visible: layer.visible,
+    locked: layer.locked,
+    type: layer.type,
+    itemsCount: layer.items?.length || 0,
+    items: layer.items?.map(item => ({
+      id: item.id,
+      mediaId: item.mediaId,
+      startTime: item.startTime,
+      duration: item.duration,
+      hasGeometry: !!item.geometry
+    }))
+  })));
+  console.log(`[FFMPEG] Media library details:`, mediaLibrary.map(item => ({
+    id: item.id,
+    type: item.type,
+    filePath: item.filePath?.substring(0, 50) + '...',
+    text: item.text?.substring(0, 30) + '...',
+    hasText: !!item.text
+  })));
   
   
 
@@ -623,9 +683,14 @@ ipcMain.on('start-render', (event, videoAssets) => {
   const mediaToInputIndex: Map<string, number> = new Map();
 
   layers.forEach((layer: Layer) => {
-    if (!layer.visible) return;
+    console.log(`[FFMPEG] Processing layer: ${layer.name} (visible: ${layer.visible}, items: ${layer.items?.length || 0})`);
+    if (!layer.visible) {
+      console.log(`[FFMPEG] Skipping invisible layer: ${layer.name}`);
+      return;
+    }
     
     layer.items.forEach((item: TimelineItem) => {
+      console.log(`[FFMPEG] Processing timeline item: ${item.id} (mediaId: ${item.mediaId})`);
       const mediaItem = mediaLibrary.find((m: MediaItem) => m.id === item.mediaId);
       if (mediaItem && !mediaToInputIndex.has(mediaItem.id)) {
         // Skip blob URLs
@@ -659,9 +724,33 @@ ipcMain.on('start-render', (event, videoAssets) => {
       }
     });
   });
-
+  
+    console.log(`[FFMPEG] Media overlay processing complete.`);
+  event.sender.send('render-progress', { progress: 30, message: `Media overlay processing complete.` });
+  
+  console.log(`[FFMPEG] Media processing complete. Used media items: ${usedMediaItems.length}`);
+  event.sender.send('render-progress', { progress: 32, message: `Media processing complete. Used ${usedMediaItems.length} media items` });
+  console.log(`[FFMPEG] Used media items breakdown:`, usedMediaItems.map(item => ({
+    id: item.id,
+    type: item.type,
+    hasText: !!item.text,
+    inputIndex: mediaToInputIndex.get(item.id),
+    filePath: item.filePath?.substring(0, 50) + '...'
+  })));
+  
+  // Debug: Check if we have any file inputs
+  console.log(`[FFMPEG] File inputs count: ${inputs.length / 2}`);
+  console.log(`[FFMPEG] File input paths:`, inputs.filter((_, index) => index % 2 === 1).map(path => path.substring(0, 50) + '...'));
+  
   if (usedMediaItems.length === 0) {
     console.error('[FFMPEG] No valid media items found');
+    console.error('[FFMPEG] Debug info:');
+    console.error(`  - Total layers: ${layers.length}`);
+    console.error(`  - Visible layers: ${layers.filter(l => l.visible).length}`);
+    console.error(`  - Total media library items: ${mediaLibrary.length}`);
+    console.error(`  - Text items: ${mediaLibrary.filter(m => m.type === 'text').length}`);
+    console.error(`  - Image items: ${mediaLibrary.filter(m => m.type === 'image').length}`);
+    console.error(`  - Video items: ${mediaLibrary.filter(m => m.type === 'video').length}`);
     event.sender.send('render-progress', { error: 'No valid media items found' });
     return;
   }
@@ -681,25 +770,42 @@ ipcMain.on('start-render', (event, videoAssets) => {
   // First, create a black background video for the full duration
   filterComplex.push(`color=black:size=${width}x${height}:duration=${totalDuration}:rate=30 [bg]`);
   let currentVideoStream = '[bg]';
+  
+  console.log(`[FFMPEG] Created background video filter: color=black:size=${width}x${height}:duration=${totalDuration}:rate=30 [bg]`);
 
   // Sort layers by index to maintain proper layering (bottom to top)
   const sortedLayers = [...layers].filter(layer => layer.visible);
   
+  console.log(`[FFMPEG] Processing ${sortedLayers.length} visible layers for media overlay`);
+  event.sender.send('render-progress', { progress: 5, message: `Processing ${sortedLayers.length} visible layers for media overlay` });
+  
   let overlayCount = 0;
   
   sortedLayers.forEach((layer: Layer, layerIndex: number) => {
-    
+    console.log(`[FFMPEG] Processing layer ${layerIndex}: ${layer.name} with ${layer.items.length} items`);
+    event.sender.send('render-progress', { progress: 10 + (layerIndex * 5), message: `Processing layer ${layerIndex}: ${layer.name} with ${layer.items.length} items` });
     
     layer.items.forEach((item: TimelineItem, itemIndex: number) => {
       const mediaItem = mediaLibrary.find((m: MediaItem) => m.id === item.mediaId);
-      if (!mediaItem) return;
+      if (!mediaItem) {
+        console.log(`[FFMPEG] No media item found for timeline item ${item.id} (mediaId: ${item.mediaId})`);
+        event.sender.send('render-progress', { progress: 15, message: `ERROR: No media item found for timeline item ${item.id} (mediaId: ${item.mediaId})` });
+        return;
+      }
+      
+      console.log(`[FFMPEG] Found media item: ${mediaItem.id} (type: ${mediaItem.type})`);
+      event.sender.send('render-progress', { progress: 20, message: `Found media item: ${mediaItem.id} (type: ${mediaItem.type})` });
       
       const inputIndex = mediaToInputIndex.get(mediaItem.id);
-      if (inputIndex === undefined) return;
+      if (inputIndex === undefined) {
+        console.log(`[FFMPEG] No input index found for media item ${mediaItem.id}`);
+        event.sender.send('render-progress', { progress: 25, message: `ERROR: No input index found for media item ${mediaItem.id}` });
+        return;
+      }
        
       // Skip processing for text items that don't have file inputs
       if (mediaItem.type === 'text' && inputIndex === -1) {
-        // Text items are handled separately
+        // Text items are handled separately in the text processing section
         return;
       }
 
@@ -802,6 +908,8 @@ ipcMain.on('start-render', (event, videoAssets) => {
 
     // Process text items separately since they don't use file inputs - respect individual item properties
     console.log('[FFMPEG] Text rendering enabled');
+    console.log(`[FFMPEG] Processing ${sortedLayers.length} layers for text items`);
+    let textItemsFound = 0;
     sortedLayers.forEach((layer: Layer) => {
       if (!layer.visible) return;
       
@@ -810,7 +918,10 @@ ipcMain.on('start-render', (event, videoAssets) => {
         if (!mediaItem || mediaItem.type !== 'text') return;
         
         const inputIndex = mediaToInputIndex.get(mediaItem.id);
+        console.log(`[FFMPEG] Text item found: ${mediaItem.id}, inputIndex: ${inputIndex}`);
         if (inputIndex !== -1) return; // Skip if already processed
+        
+        textItemsFound++;
         
         // Get geometry from timeline item or use media item properties as fallback
         const geometry = item.geometry || {
@@ -853,22 +964,26 @@ ipcMain.on('start-render', (event, videoAssets) => {
           return;
         }
         
-        // ALWAYS calculate font size based on text area geometry - ignore preview fontSize
+        // Use user's font size preference or calculate based on text area geometry
         let fontSize: number;
         let baseFontSize: number;
         
-        // Always calculate base font size from area dimensions (ignore mediaItem.fontSize)
-        baseFontSize = Math.min(itemWidth, itemHeight) * 0.2; // 20% of smaller dimension for larger text
-        fontSize = baseFontSize;
-        console.log(`[FONT SIZE] ${mediaItem.id}: ALWAYS CALCULATED fontSize=${fontSize}px (20% of min(${itemWidth}, ${itemHeight}))`);
-        console.log(`[FONT SIZE] ${mediaItem.id}: Ignoring any saved fontSize from preview, using area-based calculation`);
+        // Use user's font size if available, otherwise calculate from area dimensions
+        if (mediaItem.fontSize && mediaItem.fontSize > 0) {
+          fontSize = mediaItem.fontSize;
+          console.log(`[FONT SIZE] ${mediaItem.id}: USING USER PREFERENCE: fontSize=${fontSize}px`);
+        } else {
+          baseFontSize = Math.min(itemWidth, itemHeight) * 0.2; // 20% of smaller dimension for larger text
+          fontSize = baseFontSize;
+          console.log(`[FONT SIZE] ${mediaItem.id}: CALCULATED fontSize=${fontSize}px (20% of min(${itemWidth}, ${itemHeight}))`);
+        }
         
-        // First, escape the text for FFmpeg
+        // First, escape the text for FFmpeg (preserve line breaks)
         console.log(`[TEXT ESCAPING] ${mediaItem.id}: BEFORE: "${textContent}"`);
         const escapedText = textContent
           .replace(/['",:;]/g, '')   // Remove quotes, apostrophes, commas, colons, semicolons
-          .replace(/[\r\n]/g, ' ')   // Replace line breaks with spaces
-          .replace(/\s+/g, ' ')      // Normalize multiple spaces
+          .replace(/\r\n/g, '\n')    // Normalize line breaks to \n
+          .replace(/\r/g, '\n')      // Convert remaining \r to \n
           .trim();                   // Trim whitespace
         console.log(`[TEXT ESCAPING] ${mediaItem.id}: AFTER: "${escapedText}"`);
         
@@ -879,7 +994,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
         const maxWidth = itemWidth * 0.99;
         console.log(`[WORD WRAP PRELIMINARY] ${mediaItem.id}: maxWidth=${maxWidth}px (99% of ${itemWidth}px)`);
         const preliminaryWrapped = wrapTextForFFmpeg(escapedText, Math.floor(maxWidth / (fontSize * 0.6)));
-        const preliminaryLines = preliminaryWrapped.split('\\n');
+        const preliminaryLines = preliminaryWrapped.split('\n');
         console.log(`[WORD WRAP PRELIMINARY] ${mediaItem.id}: preliminaryLines=${preliminaryLines.length}`);
         
         // EXACT SAME optimal font size calculation as preview (lines 1368-1403)
@@ -935,26 +1050,34 @@ ipcMain.on('start-render', (event, videoAssets) => {
         fontSize = optimalFontSize;
         console.log(`[FONT SIZE] ${mediaItem.id}: USING OPTIMAL SIZE: ${optimalFontSize}px (no artificial min/max constraints)`);
         
-        // Ensure reasonable bounds only if the calculation goes extreme
-        if (fontSize < 32) {
-          console.log(`[FONT SIZE] ${mediaItem.id}: WARNING: Calculated fontSize too small (${fontSize}px), forcing to 32px`);
-          fontSize = 32;
-        }
-        if (fontSize > 200) {
-          fontSize = 200;
-          console.log(`[FONT SIZE] ${mediaItem.id}: Applied safety maximum: 200px`);
-        }
-        
         // Log final font size calculation for debugging
         console.log(`[FONT SIZE] ${mediaItem.id}: FINAL fontSize=${fontSize}px (text length: ${textContent.length}, area: ${textAreaWidth}x${textAreaHeight})`);
         
         // NOW do final word wrapping with the optimized font size
         const finalMaxCharsPerLine = Math.floor(maxWidth / (fontSize * 0.6));
         const wrappedText = wrapTextForFFmpeg(escapedText, finalMaxCharsPerLine);
-        const lines = wrappedText.split('\\n');
+        
+        // Ensure font size fits properly within the text area after wrapping
+        const textLines = wrappedText.split('\n');
+        const maxFontSizeForArea = Math.min(itemWidth / 10, itemHeight / (textLines.length || 1) * 0.8);
+        if (fontSize > maxFontSizeForArea) {
+          console.log(`[FONT SIZE] ${mediaItem.id}: Adjusting font size to fit area: ${fontSize}px -> ${maxFontSizeForArea}px`);
+          fontSize = maxFontSizeForArea;
+        }
+        
+        // Ensure reasonable bounds
+        if (fontSize < 24) {
+          console.log(`[FONT SIZE] ${mediaItem.id}: Minimum font size: 24px`);
+          fontSize = 24;
+        }
+        if (fontSize > 150) {
+          fontSize = 150;
+          console.log(`[FONT SIZE] ${mediaItem.id}: Maximum font size: 150px`);
+        }
+        // Use the already calculated textLines
         console.log(`[WORD WRAP FINAL] ${mediaItem.id}: With optimized fontSize=${fontSize}px`);
         console.log(`[WORD WRAP FINAL] ${mediaItem.id}: finalMaxCharsPerLine=${finalMaxCharsPerLine}`);
-        console.log(`[WORD WRAP FINAL] ${mediaItem.id}: wrappedText="${wrappedText}", lines=${lines.length}`);
+        console.log(`[WORD WRAP FINAL] ${mediaItem.id}: wrappedText="${wrappedText}", lines=${textLines.length}`);
         
         const fontColor = mediaItem.fontColor || '#ffffff';
         
@@ -970,7 +1093,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
         let actualLineHeight;
         let startY;
         
-        if (lines.length === 1) {
+        if (textLines.length === 1) {
           // Single line - EXACT SAME as preview (lines 1352-1353)
           actualLineHeight = itemHeight; // Full height for single line
           startY = itemY + (itemHeight / 2); // Perfect vertical center
@@ -980,70 +1103,37 @@ ipcMain.on('start-render', (event, videoAssets) => {
         } else {
           // Multi-line - EXACT SAME as preview (lines 1356-1359)
           const totalAvailableHeight = itemHeight;
-          actualLineHeight = totalAvailableHeight / lines.length; // Equal distribution
+          actualLineHeight = totalAvailableHeight / textLines.length; // Equal distribution
           const topMargin = actualLineHeight / 2; // Equal margin from top
           startY = itemY + topMargin; // Start with equal top margin
           console.log(`[TEXT POSITIONING] ${mediaItem.id}: MULTI-LINE (preview algorithm):`);
           console.log(`[TEXT POSITIONING] ${mediaItem.id}: - totalAvailableHeight=${totalAvailableHeight}px`);
-          console.log(`[TEXT POSITIONING] ${mediaItem.id}: - actualLineHeight=${actualLineHeight}px (${totalAvailableHeight}px / ${lines.length} lines)`);
+          console.log(`[TEXT POSITIONING] ${mediaItem.id}: - actualLineHeight=${actualLineHeight}px (${totalAvailableHeight}px / ${textLines.length} lines)`);
           console.log(`[TEXT POSITIONING] ${mediaItem.id}: - topMargin=${topMargin}px (actualLineHeight / 2)`);
           console.log(`[TEXT POSITIONING] ${mediaItem.id}: - startY=${startY}px (itemY + topMargin = ${itemY} + ${topMargin})`);
         }
         
-        // Calculate Y position for first line (FFmpeg baseline adjustment)
-        // Preview uses textBaseline: "middle", FFmpeg uses baseline, so adjust
-        const baselineOffset = fontSize * 0.4; // Approximate middle-to-baseline offset
-        let textY = startY + baselineOffset;
-        console.log(`[TEXT POSITIONING] ${mediaItem.id}: FFmpeg baseline adjustment: startY=${startY}px + baselineOffset=${baselineOffset}px = textY=${textY}px`);
+        // Use FFmpeg expressions for proper text centering
+        // x=(w-text_w)/2 centers text horizontally, y=(h-text_h)/2 centers text vertically
+        // For text area centering, we need to calculate relative to the text area bounds
+        const textHeight = fontSize * textLines.length * 1.2; // Approximate text height with line spacing
         
-        // Text alignment and positioning - match preview algorithm
-        // For multi-line text, FFmpeg centers each line individually
-        // For single line, we need to calculate the offset manually
-        let textX: number;
+        // Use FFmpeg expressions for automatic centering within the text area
+        // These expressions will be evaluated by FFmpeg at render time
+        const textX = `${itemX}+(${textAreaWidth}-text_w)/2`;
+        const textY = `${itemY}+(${textAreaHeight}-text_h)/2`;
         
-        if (lines.length === 1) {
-          // Single line - calculate manual centering offset
-          const approximateTextWidth = lines[0].length * fontSize * 0.6;
-          textX = centerX - (approximateTextWidth / 2);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: SINGLE LINE centering:`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - line="${lines[0]}" (length=${lines[0].length})`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - approximateTextWidth=${approximateTextWidth}px (${lines[0].length} chars * ${fontSize}px * 0.6)`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - textX=${textX}px (centerX=${centerX}px - width/2)`);
-        } else {
-          // Multi-line - calculate manual centering for the longest line
-          const lineLengths = lines.map(line => line.length);
-          const maxLineLength = Math.max(...lineLengths);
-          const approximateMaxLineWidth = maxLineLength * fontSize * 0.6;
-          textX = centerX - (approximateMaxLineWidth / 2);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: MULTI-LINE positioning:`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - lines=${lines.map(line => `"${line}"`).join(', ')}`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - maxLineLength=${maxLineLength} chars`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - approximateMaxLineWidth=${approximateMaxLineWidth}px`);
-          console.log(`[TEXT ALIGNMENT] ${mediaItem.id}: - textX=${textX}px (centerX=${centerX}px - maxWidth/2)`);
-        }
-        
-        // Ensure text is visible within video bounds
-        if (textX < 0) {
-          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textX too small (${textX}px), forcing to 10px`);
-          textX = 10;
-        }
-        if (textY < 0) {
-          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textY too small (${textY}px), forcing to 10px`);
-          textY = 10;
-        }
-        if (textX + (itemWidth * 0.8) > width) {
-          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textX too large (${textX}px), adjusting`);
-          textX = width - (itemWidth * 0.8);
-        }
-        if (textY + (itemHeight * 0.8) > height) {
-          console.log(`[TEXT POSITION] ${mediaItem.id}: WARNING: textY too large (${textY}px), adjusting`);
-          textY = height - (itemHeight * 0.8);
-        }
+        console.log(`[TEXT CENTERING] ${mediaItem.id}: Using FFmpeg centering expressions`);
+        console.log(`[TEXT CENTERING] ${mediaItem.id}: textX expression: ${textX}`);
+        console.log(`[TEXT CENTERING] ${mediaItem.id}: textY expression: ${textY}`);
+        console.log(`[TEXT CENTERING] ${mediaItem.id}: Text area: ${itemX},${itemY} to ${itemX + textAreaWidth},${itemY + textAreaHeight}`);
+        console.log(`[TEXT CENTERING] ${mediaItem.id}: Estimated text dimensions: ${textHeight}px height`);
         
         // Final positioning summary
-        console.log(`[TEXT POSITION] ${mediaItem.id}: FINAL POSITION textX=${textX}px, textY=${textY}px`);
+        console.log(`[TEXT POSITION] ${mediaItem.id}: FFmpeg centering expressions applied`);
         console.log(`[TEXT POSITION] ${mediaItem.id}: AREA BOUNDS: (${itemX}, ${itemY}) to (${itemX + itemWidth}, ${itemY + itemHeight})`);
-        console.log(`[TEXT POSITION] ${mediaItem.id}: TEXT PLACEMENT: ${lines.length > 1 ? 'multi-line start' : 'single line center'}, lines=${lines.length}`);
+        console.log(`[TEXT POSITION] ${mediaItem.id}: TEXT PLACEMENT: ${textLines.length > 1 ? 'multi-line center' : 'single line center'}, lines=${textLines.length}`);
+        console.log(`[TEXT POSITION] ${mediaItem.id}: TEXT DIMENSIONS: height=${textHeight}px`);
         
         // Text escaping already done above
         
@@ -1052,11 +1142,20 @@ ipcMain.on('start-render', (event, videoAssets) => {
         
         // Build comprehensive text filter matching preview algorithm
         // Use the wrapped text for proper line breaks
-        let textFilter = `drawtext=text='${wrappedText}'`;
+        // Escape only single quotes for FFmpeg, keep newlines as actual line breaks
+        const ffmpegEscapedText = wrappedText.replace(/'/g, "\\'");
+        let textFilter = `drawtext=text='${ffmpegEscapedText}'`;
+        
+        // Debug: Log the text being rendered
+        console.log(`[TEXT DEBUG] ${mediaItem.id}: Original text: "${wrappedText}"`);
+        console.log(`[TEXT DEBUG] ${mediaItem.id}: Escaped text: "${ffmpegEscapedText}"`);
         
         // Font properties
         textFilter += `:fontsize=${fontSize}`;
         textFilter += `:fontcolor=${fontColor}`;
+        
+        // Debug: Make text more visible for testing
+        console.log(`[TEXT DEBUG] ${mediaItem.id}: Font size: ${fontSize}px, Color: ${fontColor}`);
         
         // Log the exact fontSize being applied
         console.log(`[APPLIED FONT SIZE] ${mediaItem.id}: fontSize=${fontSize}px applied to FFmpeg filter`);
@@ -1064,7 +1163,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
         // Font family - use system fonts that FFmpeg can find (cross-platform)
         let fontPath = '';
         if (mediaItem.fontFamily) {
-          // Cross-platform font mapping
+          // Cross-platform font mapping with bold/italic variants
           const fontMap: { [key: string]: string } = {
             'Arial': platform() === 'win32' ? 'C:/Windows/Fonts/arial.ttf' : '/System/Library/Fonts/Arial.ttf',
             'Helvetica': platform() === 'win32' ? 'C:/Windows/Fonts/arial.ttf' : '/System/Library/Fonts/Helvetica.ttc',
@@ -1072,27 +1171,70 @@ ipcMain.on('start-render', (event, videoAssets) => {
             'Georgia': platform() === 'win32' ? 'C:/Windows/Fonts/georgia.ttf' : '/System/Library/Fonts/Georgia.ttf',
             'Verdana': platform() === 'win32' ? 'C:/Windows/Fonts/verdana.ttf' : '/System/Library/Fonts/Verdana.ttf'
           };
-          fontPath = fontMap[mediaItem.fontFamily] || (platform() === 'win32' ? 'C:/Windows/Fonts/arial.ttf' : '/System/Library/Fonts/Arial.ttf');
+          
+          let baseFont = fontMap[mediaItem.fontFamily] || (platform() === 'win32' ? 'C:/Windows/Fonts/arial.ttf' : '/System/Library/Fonts/Arial.ttf');
+          
+          // Handle bold and italic font variants by selecting appropriate font files
+          if (mediaItem.fontBold && mediaItem.fontItalic) {
+            // Bold italic - try to find bold italic variant
+            if (platform() === 'win32') {
+              if (mediaItem.fontFamily === 'Arial') {
+                fontPath = 'C:/Windows/Fonts/arialbi.ttf';
+              } else if (mediaItem.fontFamily === 'Times New Roman') {
+                fontPath = 'C:/Windows/Fonts/timesbi.ttf';
+              } else {
+                fontPath = baseFont; // Fallback to regular font
+              }
+            } else {
+              fontPath = baseFont; // Fallback for non-Windows
+            }
+          } else if (mediaItem.fontBold) {
+            // Bold only - try to find bold variant
+            if (platform() === 'win32') {
+              if (mediaItem.fontFamily === 'Arial') {
+                fontPath = 'C:/Windows/Fonts/arialbd.ttf';
+              } else if (mediaItem.fontFamily === 'Times New Roman') {
+                fontPath = 'C:/Windows/Fonts/timesbd.ttf';
+              } else {
+                fontPath = baseFont; // Fallback to regular font
+              }
+            } else {
+              fontPath = baseFont; // Fallback for non-Windows
+            }
+          } else if (mediaItem.fontItalic) {
+            // Italic only - try to find italic variant
+            if (platform() === 'win32') {
+              if (mediaItem.fontFamily === 'Arial') {
+                fontPath = 'C:/Windows/Fonts/ariali.ttf';
+              } else if (mediaItem.fontFamily === 'Times New Roman') {
+                fontPath = 'C:/Windows/Fonts/timesi.ttf';
+              } else {
+                fontPath = baseFont; // Fallback to regular font
+              }
+            } else {
+              fontPath = baseFont; // Fallback for non-Windows
+            }
+          } else {
+            // Regular font
+            fontPath = baseFont;
+          }
         } else {
           fontPath = platform() === 'win32' ? 'C:/Windows/Fonts/arial.ttf' : '/System/Library/Fonts/Arial.ttf';
         }
         textFilter += `:fontfile=${fontPath}`;
         
-        // Font weight and style
-        // Note: FFmpeg doesn't have a direct bold parameter, but we've already calculated optimal fontSize
-        // Don't override the carefully calculated fontSize for bold - it's already optimized
-        // if (mediaItem.fontBold) {
-        //   // Bold handling should be done in font selection, not size override
-        // }
-        if (mediaItem.fontItalic) {
-          textFilter += `:fontstyle=italic`;
-        }
+        // Debug: Log font path and styling
+        console.log(`[TEXT DEBUG] ${mediaItem.id}: Font path: ${fontPath}`);
+        console.log(`[TEXT DEBUG] ${mediaItem.id}: Bold: ${mediaItem.fontBold}, Italic: ${mediaItem.fontItalic}`);
         
-        // Text positioning - use preview algorithm results
+        // Note: Removed :fontweight=bold and :fontstyle=italic parameters as they can cause render failures
+        // Font styling is now handled by selecting appropriate font files instead
+        
+        // Text positioning with manual centering (FFmpeg drawtext doesn't have text_align)
         textFilter += `:x=${textX}:y=${textY}`;
         
         // Multi-line spacing
-        if (lines.length > 1) {
+        if (textLines.length > 1) {
           // Calculate line spacing to match preview's actualLineHeight
           const lineSpacing = actualLineHeight / fontSize; // Ratio of line height to font size
           textFilter += `:line_spacing=${lineSpacing}`;
@@ -1110,7 +1252,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
         
         // Text shadow for readability (simulate preview shadow)
         // Add shadow for better text visibility
-        textFilter += `:shadowcolor=black:shadowx=2:shadowy=2:shadowalpha=0.8`;
+        textFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
         
         // Note: enable parameter is not supported in drawtext filter
         // We'll handle timing through the filter chain instead
@@ -1122,12 +1264,11 @@ ipcMain.on('start-render', (event, videoAssets) => {
         console.log(`[TEXT FILTER] ${mediaItem.id}: - text='${wrappedText}'`);
         console.log(`[TEXT FILTER] ${mediaItem.id}: - fontsize=${fontSize}`);
         console.log(`[TEXT FILTER] ${mediaItem.id}: - fontcolor=${fontColor}`);
-        console.log(`[TEXT FILTER] ${mediaItem.id}: - x=${textX} (centered)`);
+        console.log(`[TEXT FILTER] ${mediaItem.id}: - x=${textX} (manually centered)`);
         console.log(`[TEXT FILTER] ${mediaItem.id}: - y=${textY} (baseline adjusted)`);
         console.log(`[TEXT FILTER] ${mediaItem.id}: - Background box: ${textFilter.includes('box=1') ? 'YES' : 'NO'}`);
         
         // Add text overlay to the current video stream with proper timeline timing
-        const nextStreamLabel = `text_${overlayCount}`;
         
         // Use timeline item timing information for proper text timing
         const textStartTime = item.startTime || 0;
@@ -1153,15 +1294,21 @@ ipcMain.on('start-render', (event, videoAssets) => {
             }
           }
           
+          // Ensure we have a valid color
+          if (!bgColor.startsWith('#')) {
+            bgColor = '#000000'; // Default to black if conversion failed
+            console.log(`[BACKGROUND RECT] ${mediaItem.id}: Using default color: ${bgColor}`);
+          }
+          
           // Create a colored rectangle that fills the entire text area (like preview canvas)
           // Use drawbox filter to create a filled rectangle overlay
           const bgRectFilter = `drawbox=x=${itemX}:y=${itemY}:w=${itemWidth}:h=${itemHeight}:color=${bgColor}:t=fill:enable='between(t,${textStartTime},${textEndTime})'`;
-          const bgOverlayFilter = `${currentVideoStream} ${bgRectFilter} [${nextStreamLabel}]`;
+          const bgOverlayFilter = `${currentVideoStream} ${bgRectFilter} [bg_${overlayCount}]`;
           
           console.log(`[BACKGROUND RECT] ${mediaItem.id}: Adding background rectangle ${itemWidth}x${itemHeight} at ${itemX},${itemY} with color ${bgColor}`);
           filterComplex.push(bgOverlayFilter);
         
-        currentVideoStream = `[${nextStreamLabel}]`;
+        currentVideoStream = `[bg_${overlayCount}]`;
         overlayCount++;
         }
         
@@ -1178,6 +1325,9 @@ ipcMain.on('start-render', (event, videoAssets) => {
         
       });
     });
+    
+    console.log(`[FFMPEG] Text processing complete. Text items found: ${textItemsFound}`);
+  event.sender.send('render-progress', { progress: 34, message: `Text processing complete. Found ${textItemsFound} text items` });
 
   // Mix all audio segments
   let finalAudioStream = '';
@@ -1191,9 +1341,27 @@ ipcMain.on('start-render', (event, videoAssets) => {
   }
 
   // Build FFMPEG arguments
+  console.log(`[FFMPEG] Building FFmpeg arguments...`);
+  console.log(`[FFMPEG] Filter complex count: ${filterComplex.length}`);
+  console.log(`[FFMPEG] Filter complex preview:`, filterComplex.slice(0, 3).map(filter => filter.substring(0, 100) + '...'));
+  
+  // Create a temporary filter complex script file to avoid long command line issues
+  filterScriptPath = join(tmpdir(), `filters_${Date.now()}.txt`);
+  const filterComplexString = filterComplex.join(';\n');
+  
+  try {
+    await fs.writeFile(filterScriptPath, filterComplexString, 'utf8');
+    console.log(`[FFMPEG] Filter complex script written to: ${filterScriptPath}`);
+    console.log(`[FFMPEG] Filter script size: ${filterComplexString.length} characters`);
+  } catch (error) {
+    console.error('[FFMPEG] Failed to write filter script file:', error);
+    event.sender.send('render-progress', { error: 'Failed to create filter script file. Please try again.' });
+    return;
+  }
+  
   const ffmpegArgs: string[] = [
     ...inputs,
-    '-filter_complex', filterComplex.join(';'),
+    '-filter_complex_script', filterScriptPath,
     '-map', currentVideoStream,
   ];
 
@@ -1218,12 +1386,27 @@ ipcMain.on('start-render', (event, videoAssets) => {
   );
 
   // Validate FFmpeg command before execution
-  const filterComplexString = filterComplex.join(';');
   
   console.log(`[FFMPEG] Timeline-based command: ffmpeg ${ffmpegArgs.join(' ')}`);
   console.log(`[FFMPEG] Video: ${width}x${height}, Duration: ${totalDuration}s, Audio segments: ${audioSegments.length}`);
   console.log(`[FFMPEG] Filter complex length: ${filterComplexString.length} characters`);
   console.log(`[FFMPEG] Filter complex preview: ${filterComplexString.substring(0, 500)}...`);
+  event.sender.send('render-progress', { progress: 40, message: `Filter complex created with ${filterComplexString.length} characters` });
+  
+  // Debug: Check if filter complex is empty or invalid
+  if (filterComplex.length === 0) {
+    console.error('[FFMPEG] ERROR: Filter complex is empty! No media processing filters were created.');
+    event.sender.send('render-progress', { error: 'No media processing filters were created. Check if media items and layers are properly configured.' });
+    return;
+  }
+  
+  // Debug: Log the actual filter complex content
+  console.log('[FFMPEG] Filter complex content:', JSON.stringify(filterComplex, null, 2));
+  event.sender.send('render-progress', { progress: 35, message: `Filter complex created with ${filterComplex.length} filters` });
+  
+  if (filterComplexString.length > 10000) {
+    console.warn(`[FFMPEG] WARNING: Filter complex is very long (${filterComplexString.length} chars). This might cause FFmpeg issues.`);
+  }
   
   // Debug: Log command structure
   console.log(`[FFMPEG DEBUG] Command structure:`);
@@ -1235,11 +1418,13 @@ ipcMain.on('start-render', (event, videoAssets) => {
   console.log(`[FFMPEG DEBUG] - Duration: ${totalDuration}s`);
   
   // Debug: Log each input file
+  console.log('[FFMPEG] Input files:');
   inputs.forEach((input, index) => {
     if (index % 2 === 1) { // Skip the '-i' flags, only log the file paths
       console.log(`[FFMPEG DEBUG] - Input ${Math.floor(index/2)}: ${input}`);
     }
   });
+  event.sender.send('render-progress', { progress: 38, message: `Found ${Math.floor(inputs.length/2)} input files` });
   
   // Validate inputs
   if (inputs.length === 0) {
@@ -1272,6 +1457,7 @@ ipcMain.on('start-render', (event, videoAssets) => {
   // Create a simple fallback command for basic rendering
   const createSimpleFallbackCommand = () => {
     console.log('[FFMPEG] Creating simple fallback command...');
+    event.sender.send('render-progress', { progress: 45, message: 'Creating simple fallback command (black video)' });
     
     // Simple command: just create a black video with the specified duration
     const simpleArgs = [
@@ -1328,17 +1514,23 @@ ipcMain.on('start-render', (event, videoAssets) => {
     }
   });
 
-  ffmpegProcess.on('close', (code: number) => {
+  ffmpegProcess.on('close', async (code: number) => {
+    // Clean up temporary filter script file
+    await cleanupFilterScript();
+    
     if (code === 0) {
       console.log(`[FFMPEG] Render completed successfully. Output: ${outputPath}`);
       event.sender.send('render-progress', { filePath: outputPath });
     } else {
-      console.error(`[FFMPEG] Exited with error code ${code}`);
-      console.error(`[FFMPEG] Error output: ${ffmpegErrorOutput}`);
+      console.error(`[FFMPEG] Complex render failed with error code ${code}`);
+      console.error(`[FFMPEG] Complex render error output: ${ffmpegErrorOutput}`);
+      event.sender.send('render-progress', { progress: 45, message: `Complex render failed with code ${code}. Trying fallback...` });
       
       // Try fallback simple render if complex render failed
       if (code !== 0 && !ffmpegErrorOutput.includes('fallback_attempted')) {
         console.log('[FFMPEG] Complex render failed, trying simple fallback...');
+        console.log('[FFMPEG] Complex render error details:', ffmpegErrorOutput);
+        event.sender.send('render-progress', { progress: 50, message: 'Complex render failed, trying simple fallback (black video)' });
         
         const simpleArgs = createSimpleFallbackCommand();
         const fallbackProcess = spawn(ffmpegPath, simpleArgs);
@@ -1347,7 +1539,10 @@ ipcMain.on('start-render', (event, videoAssets) => {
           console.log(`[FFMPEG FALLBACK]: ${data.toString()}`);
         });
         
-        fallbackProcess.on('close', (fallbackCode: number) => {
+        fallbackProcess.on('close', async (fallbackCode: number) => {
+          // Clean up temporary filter script file if fallback is used
+          await cleanupFilterScript();
+          
           if (fallbackCode === 0) {
             console.log(`[FFMPEG] Fallback render completed successfully. Output: ${outputPath}`);
             event.sender.send('render-progress', { filePath: outputPath });
@@ -1364,6 +1559,12 @@ ipcMain.on('start-render', (event, videoAssets) => {
       }
     }
   });
+  } catch (error) {
+    console.error('[FFMPEG] Error in start-render handler:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    
+    event.sender.send('render-progress', { error: `Render process failed: ${errorMessage}` });
+  }
 });
 
 // Handle loading the rendered video for preview

@@ -298,27 +298,27 @@ const CreateStoryScreen: React.FC = () => {
   };
 
   // **NEW: Function to get all cached voices**
-  const getCachedVoices = (): Array<{ voice_id: string; name: string }> => {
-    try {
-      const cachedVoices = localStorage.getItem('murfVoicesCache');
-      if (cachedVoices) {
-        return JSON.parse(cachedVoices);
-      }
-    } catch (error) {
-      console.warn('Failed to get cached voices:', error);
-    }
-    return [];
-  };
+  // const getCachedVoices = (): Array<{ voice_id: string; name: string }> => {
+  //   try {
+  //     const cachedVoices = localStorage.getItem('murfVoicesCache');
+  //     if (cachedVoices) {
+  //       return JSON.parse(cachedVoices);
+  //     }
+  //   } catch (error) {
+  //     console.warn('Failed to get cached voices:', error);
+  //   }
+  //   return [];
+  // };
 
   // **NEW: Function to clear voice cache**
-  const clearVoiceCache = () => {
-    try {
-      localStorage.removeItem('murfVoicesCache');
-      console.log('🎵 Voice cache cleared from localStorage');
-    } catch (error) {
-      console.warn('Failed to clear voice cache:', error);
-    }
-  };
+  // const clearVoiceCache = () => {
+  //   try {
+  //     localStorage.removeItem('murfVoicesCache');
+  //     console.log('🎵 Voice cache cleared from localStorage');
+  //   } catch (error) {
+  //     console.warn('Failed to clear voice cache:', error);
+  //   }
+  // };
 
 
 
@@ -621,144 +621,11 @@ const CreateStoryScreen: React.FC = () => {
     );
   };
 
-  // Auto-save when voice is selected
-  useEffect(() => {
-    const autoSaveVoiceSelection = async () => {
-      console.log("🎵 DEBUG: Voice selection auto-save check:", {
-        selectedVoiceId: storyData.selectedVoiceId,
-        storyId: storyData.storyId,
-        isValidStoryId: isValidStoryIdForSave(storyData.storyId),
-        hasGeneratedContent: !!storyData.generatedContent,
-        willSave: !!(storyData.selectedVoiceId && 
-                    isValidStoryIdForSave(storyData.storyId) && 
-                    storyData.generatedContent)
-      });
 
-      if (
-        storyData.selectedVoiceId &&
-        isValidStoryIdForSave(storyData.storyId) &&
-        storyData.generatedContent
-      ) {
-        try {
-          const { apiService } = await import("../../lib/api");
-          await apiService.updateStory(storyData.storyId!, {
-            selectedVoiceId: storyData.selectedVoiceId,
-          });
-          console.log("Voice selection auto-saved");
-        } catch (error) {
-          console.error("Failed to auto-save voice selection:", error);
-        }
-      }
-    };
 
-    autoSaveVoiceSelection();
-  }, [storyData.selectedVoiceId]);
 
-  // Auto-save video assets when they change
-  useEffect(() => {
-    const autoSaveVideoAssets = async () => {
-      console.log("📼 DEBUG: Video assets auto-save check:", {
-        hasVideoAssets: !!storyData.videoAssets,
-        storyId: storyData.storyId,
-        isValidStoryId: isValidStoryIdForSave(storyData.storyId),
-        isTemporaryStory: storyData.storyId?.startsWith("temp-"),
-        videoAssetsKeys: storyData.videoAssets ? Object.keys(storyData.videoAssets) : [],
-        mediaLibraryCount: (storyData.videoAssets as any)?.mediaLibrary?.length || 0,
-        layersCount: (storyData.videoAssets as any)?.layers?.length || 0,
-        willSave: !!(storyData.videoAssets && (isValidStoryIdForSave(storyData.storyId) || storyData.storyId?.startsWith("temp-")))
-      });
 
-      if (
-        storyData.videoAssets &&
-        (isValidStoryIdForSave(storyData.storyId) || (storyData.storyId && storyData.storyId.startsWith("temp-")))
-      ) {
-        try {
-          const { apiService } = await import("../../lib/api");
 
-          // If story is temporary, create it first
-          if (storyData.storyId && storyData.storyId.startsWith("temp-")) {
-            console.log("🔄 Auto-creating story from temporary ID for video assets...");
-            
-            const fullContentWithMetadata = `${storyData.generatedContent}\n\n*****\n${storyData.youtubeTitle}\n\n${storyData.youtubeDescription}\n\n${storyData.youtubeTags}\n\n${storyData.stockFootageTerms}\n*****\n${storyData.storySummary}\n*****`;
-
-            const response = await apiService.createStory({
-              title: storyData.storyName,
-              content: fullContentWithMetadata,
-              genre: storyData.genre,
-              duration: storyData.duration,
-              isDraft: true,
-              currentStep: totalSteps,
-              videoStyle: storyData.videoStyle,
-              language: storyData.language,
-              additionalContext: storyData.additionalContext,
-              videoToneEmotions: storyData.videoToneEmotions,
-              mainPrompt: storyData.mainPrompt,
-              storySummary: storyData.storySummary,
-              chapterSummaries: storyData.chapterSummaries,
-              youtubeTitle: storyData.youtubeTitle,
-              youtubeDescription: storyData.youtubeDescription,
-              youtubeTags: storyData.youtubeTags,
-              stockFootageTerms: storyData.stockFootageTerms,
-              chapters: storyData.chapters,
-              totalChapters: storyData.totalChapters,
-              selectedVoiceId: storyData.selectedVoiceId,
-              audioChunks: storyData.audioChunks,
-              totalAudioDuration: storyData.totalAudioDuration,
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-            });
-
-            if (response.success) {
-              // Update story ID from temporary to real ID
-              updateStoryData({ storyId: response.data.story.id });
-              console.log("✅ Story auto-created successfully with ID:", response.data.story.id);
-            } else {
-              throw new Error("Failed to auto-create story");
-            }
-          } else {
-            // Update existing story
-            await apiService.updateStory(storyData.storyId!, {
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-            });
-            console.log("✅ Video assets auto-saved successfully");
-          }
-        } catch (error) {
-          console.error("❌ Failed to auto-save video assets:", error);
-        }
-      } else {
-        console.log("⏸️ Video assets auto-save skipped - conditions not met");
-      }
-    };
-
-    autoSaveVideoAssets();
-  }, [storyData.videoAssets, storyData.transcriptInfo, storyData.stockMediaInfo]);
-
-  // Auto-save audio chunks when they change
-  useEffect(() => {
-    const autoSaveAudioChunks = async () => {
-      if (
-        storyData.audioChunks &&
-        storyData.audioChunks.length > 0 &&
-        isValidStoryIdForSave(storyData.storyId)
-      ) {
-        try {
-          const { apiService } = await import("../../lib/api");
-          await apiService.updateStory(storyData.storyId!, {
-            audioChunks: storyData.audioChunks,
-            totalAudioDuration: storyData.totalAudioDuration,
-          });
-          console.log("Audio chunks auto-saved");
-        } catch (error) {
-          console.error("Failed to auto-save audio chunks:", error);
-        }
-      }
-    };
-
-    autoSaveAudioChunks();
-  }, [storyData.audioChunks, storyData.totalAudioDuration]);
 
   // Debug: Monitor story ID changes
   useEffect(() => {
@@ -770,172 +637,11 @@ const CreateStoryScreen: React.FC = () => {
     });
   }, [storyData.storyId, storyData.generatedContent, currentStep]);
 
-  // Force story creation when entering video editor step (step 7)
-  useEffect(() => {
-    const forceStoryCreation = async () => {
-      if (currentStep === 7 && 
-          storyData.storyId && 
-          storyData.storyId.startsWith("temp-") && 
-          storyData.generatedContent) {
-        
-        console.log("🚀 Force creating story before entering video editor...");
-        
-        try {
-          const { apiService } = await import("../../lib/api");
-          
-          const fullContentWithMetadata = `${storyData.generatedContent}\n\n*****\n${storyData.youtubeTitle}\n\n${storyData.youtubeDescription}\n\n${storyData.youtubeTags}\n\n${storyData.stockFootageTerms}\n*****\n${storyData.storySummary}\n*****`;
 
-          const response = await apiService.createStory({
-            title: storyData.storyName,
-            content: fullContentWithMetadata,
-            genre: storyData.genre,
-            duration: storyData.duration,
-            isDraft: true,
-            currentStep: totalSteps,
-            videoStyle: storyData.videoStyle,
-            language: storyData.language,
-            additionalContext: storyData.additionalContext,
-            videoToneEmotions: storyData.videoToneEmotions,
-            mainPrompt: storyData.mainPrompt,
-            storySummary: storyData.storySummary,
-            chapterSummaries: storyData.chapterSummaries,
-            youtubeTitle: storyData.youtubeTitle,
-            youtubeDescription: storyData.youtubeDescription,
-            youtubeTags: storyData.youtubeTags,
-            stockFootageTerms: storyData.stockFootageTerms,
-            chapters: storyData.chapters,
-            totalChapters: storyData.totalChapters,
-            selectedVoiceId: storyData.selectedVoiceId,
-            audioChunks: storyData.audioChunks,
-            totalAudioDuration: storyData.totalAudioDuration,
-            videoAssets: storyData.videoAssets,
-            transcriptInfo: storyData.transcriptInfo,
-            stockMediaInfo: storyData.stockMediaInfo,
-          });
 
-          if (response.success) {
-            // Update story ID from temporary to real ID
-            updateStoryData({ storyId: response.data.story.id });
-            console.log("✅ Story force-created successfully with ID:", response.data.story.id);
-          } else {
-            console.error("❌ Failed to force-create story");
-          }
-        } catch (error) {
-          console.error("❌ Error force-creating story:", error);
-        }
-      }
-    };
 
-    forceStoryCreation();
-  }, [currentStep, storyData.storyId, storyData.generatedContent]);
 
-  // Periodic auto-save when in video editor step
-  useEffect(() => {
-    console.log("⏰ DEBUG: Periodic auto-save check:", {
-      currentStep: currentStep,
-      storyId: storyData.storyId,
-      isValidStoryId: isValidStoryIdForSave(storyData.storyId),
-      isTemporaryStory: storyData.storyId?.startsWith("temp-"),
-      hasVideoAssets: !!storyData.videoAssets,
-      willStartInterval: !!(currentStep === 7 && 
-                           (isValidStoryIdForSave(storyData.storyId) || storyData.storyId?.startsWith("temp-")) && 
-                           storyData.videoAssets)
-    });
 
-    if (currentStep === 7 && 
-        (isValidStoryIdForSave(storyData.storyId) || (storyData.storyId && storyData.storyId.startsWith("temp-"))) && 
-        storyData.videoAssets) {
-      console.log("🔄 Starting periodic auto-save interval (every 10 seconds)");
-      const interval = setInterval(async () => {
-        try {
-          const { apiService } = await import("../../lib/api");
-
-          // If story is temporary, create it first
-          if (storyData.storyId && storyData.storyId.startsWith("temp-")) {
-            console.log("🔄 Periodic auto-save: Creating story from temporary ID...");
-            
-            const fullContentWithMetadata = `${storyData.generatedContent}\n\n*****\n${storyData.youtubeTitle}\n\n${storyData.youtubeDescription}\n\n${storyData.youtubeTags}\n\n${storyData.stockFootageTerms}\n*****\n${storyData.storySummary}\n*****`;
-
-            const response = await apiService.createStory({
-              title: storyData.storyName,
-              content: fullContentWithMetadata,
-              genre: storyData.genre,
-              duration: storyData.duration,
-              isDraft: true,
-              currentStep: totalSteps,
-              videoStyle: storyData.videoStyle,
-              language: storyData.language,
-              additionalContext: storyData.additionalContext,
-              videoToneEmotions: storyData.videoToneEmotions,
-              mainPrompt: storyData.mainPrompt,
-              storySummary: storyData.storySummary,
-              chapterSummaries: storyData.chapterSummaries,
-              youtubeTitle: storyData.youtubeTitle,
-              youtubeDescription: storyData.youtubeDescription,
-              youtubeTags: storyData.youtubeTags,
-              stockFootageTerms: storyData.stockFootageTerms,
-              chapters: storyData.chapters,
-              totalChapters: storyData.totalChapters,
-              selectedVoiceId: storyData.selectedVoiceId,
-              audioChunks: storyData.audioChunks,
-              totalAudioDuration: storyData.totalAudioDuration,
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-            });
-
-            if (response.success) {
-              // Update story ID from temporary to real ID
-              updateStoryData({ storyId: response.data.story.id });
-              console.log("✅ Periodic auto-save: Story created successfully with ID:", response.data.story.id);
-            } else {
-              throw new Error("Failed to create story during periodic auto-save");
-            }
-          } else {
-            // Update existing story
-            await apiService.updateStory(storyData.storyId!, {
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-            });
-            console.log("💾 Periodic auto-save of video assets completed");
-          }
-        } catch (error) {
-          console.error("❌ Failed to periodic auto-save video assets:", error);
-        }
-      }, 10000); // Save every 10 seconds
-
-      return () => {
-        console.log("🛑 Stopping periodic auto-save interval");
-        clearInterval(interval);
-      };
-    }
-  }, [currentStep, storyData.storyId, storyData.videoAssets, storyData.transcriptInfo, storyData.stockMediaInfo]);
-
-  // Save video assets when leaving video editor step
-  useEffect(() => {
-    return () => {
-      // This cleanup function runs when the component unmounts or when dependencies change
-      if (currentStep === 7 && 
-          isValidStoryIdForSave(storyData.storyId) && 
-          storyData.videoAssets) {
-        const saveOnExit = async () => {
-          try {
-            const { apiService } = await import("../../lib/api");
-            await apiService.updateStory(storyData.storyId!, {
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-            });
-            console.log("💾 Save on exit from video editor");
-          } catch (error) {
-            console.error("Failed to save on exit from video editor:", error);
-          }
-        };
-        saveOnExit();
-      }
-    };
-  }, [currentStep, storyData.storyId, storyData.videoAssets, storyData.transcriptInfo, storyData.stockMediaInfo]);
 
   const handleNext = () => {
     // Stop any playing audio before navigation
@@ -946,13 +652,13 @@ const CreateStoryScreen: React.FC = () => {
     if (currentStep < totalSteps) {
       const nextStep = currentStep + 1;
       
-      // Force story creation when entering video editor (step 7)
+      // Only create story when entering video editor if we don't have a real story ID
       if (currentStep === 6 && nextStep === 7 && 
           storyData.storyId && 
           storyData.storyId.startsWith("temp-") && 
           storyData.generatedContent) {
         
-        console.log("🚀 Force creating story before entering video editor (handleNext)...");
+        console.log("🚀 Creating story before entering video editor (handleNext)...");
         
         const forceStoryCreation = async () => {
           try {
@@ -991,7 +697,7 @@ const CreateStoryScreen: React.FC = () => {
             if (response.success) {
               // Update story ID from temporary to real ID
               updateStoryData({ storyId: response.data.story.id });
-              console.log("✅ Story force-created successfully with ID:", response.data.story.id);
+              console.log("✅ Story created successfully with ID:", response.data.story.id);
               
               // Now proceed to next step with real story ID
               setCurrentStep(nextStep);
@@ -999,7 +705,7 @@ const CreateStoryScreen: React.FC = () => {
                 maxStepReached: Math.max(storyData.maxStepReached || 1, nextStep),
               });
             } else {
-              console.error("❌ Failed to force-create story");
+              console.error("❌ Failed to create story");
               // Still proceed to next step even if creation fails
               setCurrentStep(nextStep);
               updateStoryData({
@@ -1007,7 +713,7 @@ const CreateStoryScreen: React.FC = () => {
               });
             }
           } catch (error) {
-            console.error("❌ Error force-creating story:", error);
+            console.error("❌ Error creating story:", error);
             // Still proceed to next step even if creation fails
             setCurrentStep(nextStep);
             updateStoryData({
@@ -1027,27 +733,6 @@ const CreateStoryScreen: React.FC = () => {
       updateStoryData({
         maxStepReached: Math.max(storyData.maxStepReached || 1, nextStep),
       });
-
-      // Force save current state when navigating
-      if (isValidStoryIdForSave(storyData.storyId)) {
-        const forceSaveCurrentState = async () => {
-          try {
-            const { apiService } = await import("../../lib/api");
-            await apiService.updateStory(storyData.storyId!, {
-              maxStepReached: Math.max(storyData.maxStepReached || 1, nextStep),
-              videoAssets: storyData.videoAssets,
-              transcriptInfo: storyData.transcriptInfo,
-              stockMediaInfo: storyData.stockMediaInfo,
-              audioChunks: storyData.audioChunks,
-              totalAudioDuration: storyData.totalAudioDuration,
-            });
-            console.log("💾 Forced save during step navigation");
-          } catch (error) {
-            console.error("Failed to force save during navigation:", error);
-          }
-        };
-        forceSaveCurrentState();
-      }
     }
   };
 
@@ -1646,6 +1331,35 @@ const CreateStoryScreen: React.FC = () => {
       return;
     }
 
+    // Check if there are actual changes to save
+    const isRealStory = storyData.storyId && !storyData.storyId.startsWith("temp-");
+    if (isRealStory && originalStoryData) {
+      // Compare current data with original data to detect changes
+      const hasChanges = 
+        storyData.storyName !== originalStoryData.storyName ||
+        storyData.generatedContent !== originalStoryData.generatedContent ||
+        storyData.genre !== originalStoryData.genre ||
+        storyData.duration !== originalStoryData.duration ||
+        storyData.videoStyle !== originalStoryData.videoStyle ||
+        storyData.language !== originalStoryData.language ||
+        storyData.selectedVoiceId !== originalStoryData.selectedVoiceId ||
+        JSON.stringify(storyData.videoAssets) !== JSON.stringify(originalStoryData.videoAssets) ||
+        JSON.stringify(storyData.audioChunks) !== JSON.stringify(originalStoryData.audioChunks) ||
+        JSON.stringify(storyData.transcriptInfo) !== JSON.stringify(originalStoryData.transcriptInfo) ||
+        JSON.stringify(storyData.stockMediaInfo) !== JSON.stringify(originalStoryData.stockMediaInfo);
+
+      if (!hasChanges) {
+        console.log("📝 No changes detected, skipping save");
+        addToast({
+          type: "info",
+          title: "No Changes",
+          message: "No changes to save",
+        });
+        navigate("/dashboard", { state: { refresh: true } });
+        return;
+      }
+    }
+
     setIsSaving(true);
 
     try {
@@ -1955,17 +1669,18 @@ const CreateStoryScreen: React.FC = () => {
     // Save the latest video assets before rendering
     if (storyData.videoAssets) {
       console.log(
-        "Starting render process from frontend...",
+        "Preparing video assets for rendering...",
         storyData.videoAssets
       );
       
       // Ensure we have the latest video assets from the VideoEditor
+      // Use the current state from the lifted state props
       const latestVideoAssets = {
         ...storyData.videoAssets,
-        // Include the current state from VideoEditor if available
-        mediaItems: mediaItems || (storyData.videoAssets as any).mediaLibrary || [],
+        // Use the current state from VideoEditor (lifted state)
+        mediaLibrary: mediaItems || [],
         timelineItems: timelineItems || [],
-        layers: layers || (storyData.videoAssets as any).layers || [],
+        layers: layers || [],
         timeline: {
           totalDuration: storyData.videoAssets.timeline?.totalDuration || 30,
           currentTime: 0,
@@ -1994,11 +1709,30 @@ const CreateStoryScreen: React.FC = () => {
       };
       
       console.log("Latest video assets for rendering:", latestVideoAssets);
+      console.log("Layers data:", layers);
+      console.log("Media items data:", mediaItems);
+      console.log("Timeline items data:", timelineItems);
       
-      // Cast to the specific type to satisfy the compiler
-      (window as any).electron.startRender(latestVideoAssets as any);
+      // Debug: Check if we have any visible layers with items
+      const visibleLayers = layers?.filter(layer => layer.visible) || [];
+      const layersWithItems = visibleLayers.filter(layer => layer.items && layer.items.length > 0);
+      console.log("Visible layers:", visibleLayers.length);
+      console.log("Layers with items:", layersWithItems.length);
+      console.log("Total timeline items:", timelineItems?.length || 0);
+      
+      // Update the story data with the latest video assets
+      setStoryData(prev => ({
+        ...prev,
+        videoAssets: latestVideoAssets
+      }));
+      
+      // Force a save to ensure the latest state is persisted
+      if (handleVideoAssetsUpdate) {
+        handleVideoAssetsUpdate(latestVideoAssets);
+      }
+      
       setHasRenderFailed(false); // Reset render failure state
-      setCurrentStep(8);
+      setCurrentStep(8); // Navigate to render screen
     } else {
       console.error("Render clicked but no videoAssets found in storyData.");
     }
@@ -2912,6 +2646,7 @@ const CreateStoryScreen: React.FC = () => {
           <RenderScreen
             onBackToEditor={handleBackToEditor}
             onSaveComplete={handleSaveComplete}
+            videoAssets={storyData.videoAssets}
           />
         );
       default:

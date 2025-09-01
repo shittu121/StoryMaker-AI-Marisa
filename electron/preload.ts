@@ -99,11 +99,28 @@ contextBridge.exposeInMainWorld("storyDB", {
   updateStory: (id: string, updates: any) =>
     ipcRenderer.invoke("storyDB:updateStory", id, updates),
   deleteStory: (id: string) => ipcRenderer.invoke("storyDB:deleteStory", id),
+  cleanupDuplicates: () => ipcRenderer.invoke("storyDB:cleanupDuplicates"),
+  getDatabaseStats: () => ipcRenderer.invoke("storyDB:getDatabaseStats"),
 });
 
 contextBridge.exposeInMainWorld('electron', {
   // ... existing exposed functions
-  startRender: (videoAssets: any) => ipcRenderer.send('start-render', videoAssets),
+  startRender: (videoAssets: any) => {
+    try {
+      console.log('[PRELOAD] startRender called with videoAssets:', {
+        hasVideoAssets: !!videoAssets,
+        hasLayers: !!videoAssets?.layers,
+        layersCount: videoAssets?.layers?.length || 0,
+        hasMediaLibrary: !!videoAssets?.mediaLibrary,
+        mediaLibraryCount: videoAssets?.mediaLibrary?.length || 0
+      });
+      ipcRenderer.send('start-render', videoAssets);
+      console.log('[PRELOAD] start-render IPC message sent successfully');
+    } catch (error) {
+      console.error('[PRELOAD] Error sending start-render IPC message:', error);
+      throw error;
+    }
+  },
   onRenderProgress: (callback: (event: any, data: any) => void) => {
     ipcRenderer.on('render-progress', callback);
   },
